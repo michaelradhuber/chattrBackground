@@ -84,45 +84,6 @@ library(chattrBackground)
 sara_chat()
 ```
 
-### Key Differences from v1.0
-
-| Aspect | v1.0 (chattr) | v2.0 (SARA) |
-|--------|---------------|-------------|
-| **Architecture** | Background R job | Direct Shiny app |
-| **Dependencies** | chattr, port management | shiny, httr2 only |
-| **Context Sharing** | Manual addins | Automatic tools |
-| **Tool Calling** | None | 5 built-in tools |
-| **Status Display** | Console output | UI status area |
-| **Semantic Analysis** | Not available | Built-in |
-| **Multi-user** | Port-based isolation | Not needed |
-
-### What Was Removed
-
-#### Deleted Files
-- `R/chattr_background.R` (86 lines) - Background job management
-- `R/context_sharing.R` (200+ lines) - Manual context addins
-
-#### Deleted Functions
-- `chattr_background()` - No longer needed
-- `chattr_clear()` - Replaced with UI button
-- `chattr_stop()` - No background process to stop
-- `chattr_share_data()` - Automatic via tool calling
-- `chattr_share_script()` - Automatic via tool calling
-
-### Updated Files
-
-#### DESCRIPTION
-- Title: "SARA - AI Coding Assistant with Tool Calling"
-- Version: 2.0.0
-- Dependencies: shiny, httr2 (removed chattr)
-
-#### NAMESPACE
-- Old: 5 exports (chattr_*)
-- New: 1 export (sara_chat)
-
-#### addins.dcf
-- Old: 5 addins (chattr operations)
-- New: 1 addin (SARA Chat)
 
 ### Core Implementation Details
 
@@ -280,7 +241,7 @@ sara_chat()
 
 #### Reinstall After Changes
 ```bash
-cd /tmp/chattrBackground
+cd ../chattrBackground
 R CMD INSTALL .
 ```
 
@@ -305,4 +266,4 @@ ollama list | grep sara
 
 **Status:** COMPLETE AND PRODUCTION READY
 **Date:** January 26, 2026
-**Location:** `/tmp/chattrBackground/`
+**Location:** `../chattrBackground/`

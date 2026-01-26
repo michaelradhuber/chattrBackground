@@ -28,10 +28,10 @@ SARA is an AI coding assistant for R with direct Ollama integration and autonomo
 
 ```r
 # Install from source
-R CMD INSTALL /tmp/chattrBackground
+R CMD INSTALL ../chattrBackground
 
 # Or in R
-setwd("/tmp/chattrBackground")
+setwd("../chattrBackground")
 install.packages(".", repos = NULL, type = "source")
 ```
 
@@ -131,18 +131,6 @@ SARA shows real-time status in the UI:
 - "🔧 Calling: search_r_help" - Executing tool
 - "Generating response..." - Preparing final answer
 - Errors displayed inline
-
-## Comparison with Previous Version
-
-| Feature | v1.0 (chattr) | v2.0 (SARA) |
-|---------|---------------|-------------|
-| Backend | Background R job | Direct Shiny |
-| Port management | User-specific ports | Not needed |
-| Context sharing | Manual addins | Automatic tools |
-| Tool calling | None | 5 built-in tools |
-| Semantic analysis | None | Built-in |
-| Dependencies | chattr package | shiny, httr2 only |
-| Status visibility | Console output | UI status area |
 
 ## Requirements
 
