@@ -276,11 +276,6 @@ sara_chat <- function(as_background = NULL) {
   get_system_prompt <- function() {
     "USE_CUSTOM_INSTRUCTIONS
 
-CRITICAL LANGUAGE RULES - ABSOLUTE PRIORITY:
-NEVER respond in Thai or Chinese - THIS IS FORBIDDEN!
-ALWAYS respond in the language used by the user (English or German preferred).
-If you catch yourself using Thai/Chinese, STOP and rewrite in English.
-
 Use the 'Tidy Modeling with R' (https://www.tmwr.org/) book as main reference
 Use the 'R for Data Science' (https://r4ds.had.co.nz/) book as main reference
 Use tidyverse packages: readr, ggplot2, dplyr, tidyr
