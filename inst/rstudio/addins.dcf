@@ -1,0 +1,4 @@
+Name: SARA Chat (AI Assistant)
+Description: Opens SARA - your AI coding assistant with tool calling support
+Binding: sara_chat
+Interactive: true

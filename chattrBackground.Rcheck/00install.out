@@ -1,0 +1,11 @@
+* installing *source* package ‘chattrBackground’ ...
+** this is package ‘chattrBackground’ version ‘2.0.0’
+** using staged installation
+** R
+Error in parse(...) : 
+  /usr/local/src/chattrBackground/R/sara_direct.R:496:5: Unerwartete(s) ')'
+495:       list(role = "system", content = get_system_prompt())
+496:     )
+         ^
+ERROR: unable to collate and parse R files for package ‘chattrBackground’
+* removing ‘/usr/local/src/chattrBackground/chattrBackground.Rcheck/chattrBackground’
