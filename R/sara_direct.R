@@ -274,36 +274,52 @@ sara_chat <- function(as_background = NULL) {
   # ============================================================================
 
   get_system_prompt <- function() {
-    "LANGUAGE RULES - READ FIRST:
-- NEVER respond in Thai (ไทย) - this is FORBIDDEN
-- NEVER respond in Chinese (中文) - this is FORBIDDEN
-- ONLY use English or German
-- Default to English unless user writes in German
-- If user writes in English → respond in English
-- If user writes in German → respond in German
+    "USE_CUSTOM_INSTRUCTIONS
 
-You are a helpful R coding assistant using tidyverse and tidymodels.
+CRITICAL LANGUAGE RULES - ABSOLUTE PRIORITY:
+NEVER respond in Thai or Chinese - THIS IS FORBIDDEN!
+ALWAYS respond in the language used by the user (English or German preferred).
+If you catch yourself using Thai/Chinese, STOP and rewrite in English.
 
-AVAILABLE TOOLS (call these yourself when needed):
-1. search_r_help(topic) - Search R documentation
-2. search_r_packages(keyword) - Search R packages
-3. get_user_dataframes() - Get all dataframes from user environment
-4. get_user_script() - Get user's active R script
-5. run_batch_classify(df_name, column_name, task_prompt, result_column, batch_size) - Semantic text analysis
+Use the 'Tidy Modeling with R' (https://www.tmwr.org/) book as main reference
+Use the 'R for Data Science' (https://r4ds.had.co.nz/) book as main reference
+Use tidyverse packages: readr, ggplot2, dplyr, tidyr
+For models, use tidymodels packages: recipes, parsnip, yardstick, workflows, broom
+Avoid explanations unless requested by user, expecting code only
 
-When user asks about their data/scripts, call get_user_dataframes() or get_user_script() automatically.
-For semantic analysis (classification, sentiment, urgency), use run_batch_classify() - NOT regex.
+You are a helpful coding assistant that uses R and the tidyverse
 
-References: tmwr.org, r4ds.had.co.nz
-Packages: dplyr, ggplot2, tidyr, recipes, parsnip, workflows
-Be concise - provide code unless user asks for explanations."
+AVAILABLE TOOLS:
+You have access to these helper functions you can call yourself:
+
+1. search_r_help(topic) - Search R official documentation
+2. search_r_packages(keyword) - Search R packages/extensions
+3. get_user_dataframes() - Retrieve all dataframes from user's environment
+4. get_user_script() - Get the user's currently open R script
+5. run_batch_classify() - Perform semantic text analysis on dataframe columns
+
+When a user asks about data or scripts you don't have context for, use get_user_dataframes() or get_user_script() to retrieve it yourself.
+When you're unsure about R functions or packages, use search_r_help() or search_r_packages().
+
+SEMANTIC ANALYSIS: When users ask you to semantically analyze text in dataframes (classify, score, categorize based on meaning, not keywords), use run_batch_classify():
+
+1. First call get_user_dataframes() to see the data structure
+2. Then call run_batch_classify() providing:
+   - df_name: the dataframe name
+   - column_name: the text column to analyze
+   - task_prompt: Clear instruction that specifies BOTH the analysis task AND the expected output format based on user's request
+   - result_column: appropriate column name based on user's request
+
+CRITICAL: Your task_prompt must explicitly specify what values to return. If user says 'set to 1 if urgent', use 'Return 1 if urgent, otherwise 0'. If user says 'categorize', specify the categories. Match the user's intent for output format.
+
+IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do NOT suggest keyword-based regex or grepl solutions."
   }
 
   # ============================================================================
   # OLLAMA API CALL WITH TOOL SUPPORT (with status callback)
   # ============================================================================
 
-  call_ollama_with_tools <- function(messages, tools = NULL, max_iterations = 3, status_callback = NULL) {
+  call_ollama_with_tools <- function(messages, tools = NULL, max_iterations = 3, status_callback = NULL, debug = FALSE, debug_callback = NULL) {
     iteration <- 0
 
     while (iteration < max_iterations) {
@@ -338,7 +354,7 @@ Be concise - provide code unless user asks for explanations."
           # Add assistant's tool call message to history
           messages[[length(messages) + 1]] <- list(
             role = "assistant",
-            content = message_content$content %||% "",
+            content = "",
             tool_calls = message_content$tool_calls
           )
 
@@ -346,6 +362,9 @@ Be concise - provide code unless user asks for explanations."
           for (i in seq_along(message_content$tool_calls)) {
             tool_call <- message_content$tool_calls[[i]]
             tool_name <- tool_call$`function`$name
+            if (debug && !is.null(debug_callback)) {
+              debug_callback(sprintf("🔧 Calling tool: %s", tool_name))
+            }
             tool_args <- tool_call$`function`$arguments
 
             if (!is.null(status_callback)) {
@@ -354,6 +373,9 @@ Be concise - provide code unless user asks for explanations."
 
             # Execute the tool
             tool_result <- execute_tool(tool_name, tool_args)
+            if (debug && !is.null(debug_callback)) {
+              debug_callback(sprintf("✅ Tool %s completed", tool_name))
+            }
 
             # Add tool result to messages
             messages[[length(messages) + 1]] <- list(
@@ -400,8 +422,25 @@ Be concise - provide code unless user asks for explanations."
   # ============================================================================
 
   ui <- shiny::fluidPage(
-    shinyjs::useShinyjs(),
     shiny::titlePanel("SARA Chat"),
+    shinyjs::useShinyjs(),
+    shiny::tags$head(
+      shiny::tags$style(shiny::HTML("
+        #sara_spinner {
+          display: none;
+          width: 16px;
+          height: 16px;
+          border: 2px solid #ccc;
+          border-top-color: #28a745;
+          border-radius: 50%;
+          animation: sara_spin 0.8s linear infinite;
+          margin-right: 6px;
+        }
+        @keyframes sara_spin {
+          to { transform: rotate(360deg); }
+        }
+      ")
+    )),
 
     shiny::fluidRow(
       shiny::column(12,
@@ -428,6 +467,11 @@ Be concise - provide code unless user asks for explanations."
           id = "chat_container",
           style = "height: 400px; overflow-y: scroll; border: 1px solid #ddd; padding: 10px; background: #f9f9f9;",
           shiny::uiOutput("chat_history")
+        ),
+        shiny::div(
+          id = "debug_output",
+          style = "margin-top: 10px; padding: 10px; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; display: none;",
+          shiny::uiOutput("debug_messages")
         )
       )
     ),
@@ -436,7 +480,8 @@ Be concise - provide code unless user asks for explanations."
       shiny::column(12,
         shiny::div(
           id = "status_area",
-          style = "min-height: 20px; padding: 5px; color: #666; font-size: 0.9em;",
+          style = "min-height: 20px; padding: 5px; color: #666; font-size: 0.9em; display: flex; align-items: center;",
+          shiny::div(id = "sara_spinner"),
           shiny::uiOutput("status_message")
         )
       )
@@ -454,8 +499,9 @@ Be concise - provide code unless user asks for explanations."
     ),
 
     shiny::tags$script(shiny::HTML("
-      $(document).on('keypress', function(e) {
-        if(e.which == 13 && !e.shiftKey) {
+      $(document).on('keydown', '#user_input', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
           $('#send').click();
         }
       });
@@ -485,123 +531,50 @@ Be concise - provide code unless user asks for explanations."
   server <- function(input, output, session) {
 
     # Initialize chat history with system message
-    # Initialize chat history with system message
     chat_history <- shiny::reactiveVal(list(
       list(role = "system", content = get_system_prompt())
     ))
     
     # Debug mode toggle
     debug_enabled <- shiny::reactiveVal(FALSE)
-      list(role = "system", content = get_system_prompt())
-    ))
+    debug_log <- shiny::reactiveVal(character(0))
+
+    append_debug <- function(msg) {
+      if (!isTRUE(debug_enabled())) return()
+      current_debug <- debug_log()
+      timestamp <- format(Sys.time(), "%H:%M:%S")
+      current_debug[[length(current_debug) + 1]] <- paste0("[", timestamp, "] ", msg)
+      debug_log(current_debug)
+    }
+
+    contains_forbidden_language <- function(text) {
+      if (is.null(text) || !nzchar(text)) return(FALSE)
+      grepl("[\\p{Han}\\p{Thai}]", text, perl = TRUE)
+    }
+
+    detect_target_language <- function(text) {
+      if (is.null(text) || !nzchar(text)) return("English")
+      if (grepl("[äöüÄÖÜß]", text)) return("German")
+      "English"
+    }
 
     # Status message for showing what SARA is doing
     status_msg <- shiny::reactiveVal("")
-
-    # Create ExtendedTask for async API calls
-    sara_task <- shiny::ExtendedTask$new(function(messages, tools, debug = FALSE) {
-      # This runs in a separate R process
-      library(httr2)
-      
-      # Define execute_tool inside the task
-      execute_tool <- function(tool_name, tool_args) {
-        # Tool implementations need to be here or passed in
-        result <- switch(tool_name,
-          "search_r_help" = {
-            tryCatch({
-              results <- capture.output(help.search(tool_args$topic, agrep = FALSE))
-              if (length(results) == 0) paste("No help found for:", tool_args$topic)
-              else paste(head(results, 20), collapse = "\n")
-            }, error = function(e) paste("Error:", e$message))
-          },
-          "search_r_packages" = {
-            tryCatch({
-              results <- capture.output(help.search(tool_args$keyword, agrep = FALSE, package = NULL))
-              if (length(results) == 0) paste("No packages found for:", tool_args$keyword)
-              else paste(head(results, 20), collapse = "\n")
-            }, error = function(e) paste("Error:", e$message))
-          },
-          "get_user_dataframes" = get_user_dataframes(),
-          "get_user_script" = get_user_script(),
-          "run_batch_classify" = run_batch_classify(
-            df_name = tool_args$df_name,
-            column_name = tool_args$column_name,
-            task_prompt = tool_args$task_prompt,
-            result_column = tool_args$result_column %||% "result",
-            batch_size = tool_args$batch_size %||% 10
-          ),
-          paste("Unknown tool:", tool_name)
-        )
-        return(result)
-      }
-      
-      # Run the API call with tool loop
-      iteration <- 0
-      max_iterations <- 3
-      
-      while (iteration < max_iterations) {
-        iteration <- iteration + 1
-        if (debug) cat(sprintf("[SARA Debug] Iteration %d/%d\n", iteration, max_iterations))
-        
-        body <- list(
-          model = "sara",
-          messages = messages,
-          stream = FALSE
-        )
-        
-        if (!is.null(tools) && length(tools) > 0) {
-          body$tools <- tools
-        }
-        
-        response <- httr2::request("http://127.0.0.1:11434/api/chat") |>
-          httr2::req_body_json(body, auto_unbox = TRUE) |>
-          httr2::req_perform() |>
-          httr2::resp_body_json()
-        
-        message_content <- response$message
-        
-        # Check for tool calls
-        if (!is.null(message_content$tool_calls) && length(message_content$tool_calls) > 0) {
-          # Add assistant message
-          messages[[length(messages) + 1]] <- list(
-            role = "assistant",
-            content = message_content$content %||% "",
-            tool_calls = message_content$tool_calls
-          )
-          
-          # Execute tools
-          for (tool_call in message_content$tool_calls) {
-            tool_name <- tool_call$`function`$name
-            tool_args <- tool_call$`function`$arguments
-            if (debug) cat(sprintf("[SARA Debug] Calling tool: %s\n", tool_name))
-            tool_result <- execute_tool(tool_name, tool_args)
-            if (debug) cat(sprintf("[SARA Debug] Tool %s completed\n", tool_name))
-            
-            messages[[length(messages) + 1]] <- list(
-              role = "tool",
-              content = tool_result
-            )
-          }
-          next
-        } else {
-          return(list(
-            content = message_content$content %||% "",
-            messages = messages
-          ))
-        }
-      }
-      
-      return(list(
-        content = "Max iterations reached",
-        messages = messages
-      ))
-    })
 
     # Render status message
     output$status_message <- shiny::renderUI({
       msg <- status_msg()
       if (nchar(msg) > 0) {
         shiny::tags$span(style = "color: #007bff;", msg)
+      } else {
+        shiny::tags$span("")
+      }
+    })
+
+    output$debug_messages <- shiny::renderUI({
+      messages <- debug_log()
+      if (length(messages) > 0) {
+        shiny::HTML(paste(messages, collapse = '<br>'))
       } else {
         shiny::tags$span("")
       }
@@ -616,6 +589,7 @@ Be concise - provide code unless user asks for explanations."
                        "Start chatting with SARA... She can search R help, retrieve data/scripts, and perform semantic analysis automatically!"))
       }
 
+      # Skip system message and tool messages in display
       display_messages <- messages[-1]
       display_messages <- Filter(function(msg) msg$role != "tool", display_messages)
 
@@ -627,6 +601,7 @@ Be concise - provide code unless user asks for explanations."
             shiny::tags$pre(style = "margin: 5px 0; white-space: pre-wrap;", msg$content)
           )
         } else if (msg$role == "assistant") {
+          # Show tool calls if present
           tool_info <- NULL
           if (!is.null(msg$tool_calls)) {
             tool_names <- sapply(msg$tool_calls, function(tc) tc$`function`$name)
@@ -648,29 +623,6 @@ Be concise - provide code unless user asks for explanations."
       shiny::tagList(ui_messages)
     })
 
-    # When task completes, update chat
-    shiny::observeEvent(sara_task$result(), {
-      result <- sara_task$result()
-      
-      if (!is.null(result)) {
-        # Update history with all new messages
-        chat_history(result$messages)
-        
-        # Add final response if present
-        if (!is.null(result$content) && nchar(result$content) > 0) {
-          current_history <- chat_history()
-          current_history[[length(current_history) + 1]] <- list(
-            role = "assistant",
-            content = result$content
-          )
-          chat_history(current_history)
-        }
-        
-        status_msg("")
-        shinyjs::enable("send")
-      }
-    })
-
     # Send message
     shiny::observeEvent(input$send, {
       shiny::req(input$user_input)
@@ -687,12 +639,68 @@ Be concise - provide code unless user asks for explanations."
       chat_history(current_history)
 
       shiny::updateTextInput(session, "user_input", value = "")
-
-      status_msg("⏳ SARA is processing...")
-
-      # Invoke the async task
+      shinyjs::disable("user_input")
       shinyjs::disable("send")
-      sara_task$invoke(current_history, get_tools(), debug_enabled())
+      shinyjs::show("sara_spinner")
+
+      if (isTRUE(debug_enabled())) {
+        append_debug(paste0("📩 Message received: ", substr(user_msg, 1, 50), if (nchar(user_msg) > 50) "..." else ""))
+        append_debug("▶️ Starting SARA processing...")
+      }
+
+      status_msg("SARA is thinking...")
+
+      # Call Ollama with tool support and status callback
+      result <- call_ollama_with_tools(
+        current_history,
+        get_tools(),
+        status_callback = function(msg) {
+          status_msg(msg)
+        },
+        debug = debug_enabled(),
+        debug_callback = append_debug
+      )
+
+      if (contains_forbidden_language(result$content)) {
+        target_lang <- detect_target_language(user_msg)
+        append_debug(paste0("⚠️ Non-English output detected; retrying in ", target_lang, "..."))
+        retry_messages <- current_history
+        retry_messages[[1]]$content <- paste0(
+          retry_messages[[1]]$content,
+          "\n\nLANGUAGE OVERRIDE: Respond only in ", target_lang, ". The user's last message is in ", target_lang, "."
+        )
+        result <- call_ollama_with_tools(
+          retry_messages,
+          get_tools(),
+          status_callback = function(msg) {
+            status_msg(msg)
+          },
+          debug = debug_enabled(),
+          debug_callback = append_debug
+        )
+      }
+
+      if (isTRUE(debug_enabled())) {
+        append_debug("✅ SARA processing complete")
+      }
+
+      # Update history with new messages (including tool calls)
+      chat_history(result$messages)
+
+      # Add final response
+      if (!is.null(result$content) && nchar(result$content) > 0) {
+        current_history <- chat_history()
+        current_history[[length(current_history) + 1]] <- list(
+          role = "assistant",
+          content = result$content
+        )
+        chat_history(current_history)
+      }
+
+      status_msg("")
+      shinyjs::hide("sara_spinner")
+      shinyjs::enable("user_input")
+      shinyjs::enable("send")
     })
 
     # Clear chat
@@ -708,16 +716,26 @@ Be concise - provide code unless user asks for explanations."
     shiny::observeEvent(input$close_app, {
       shiny::showNotification("Closing SARA...", type = "message", duration = 1)
       shiny::stopApp()
-    
-    # Toggle debug mode
-    shiny::observeEvent(input$toggle_debug, {
-      debug_enabled(!debug_enabled())
-      if (debug_enabled()) {
-        shiny::showNotification("Debug mode ON - check Background Jobs pane for details", type = "message", duration = 3)
-      } else {
-        shiny::showNotification("Debug mode OFF", type = "message", duration = 2)
-      }
     })
+
+    # Toggle debug
+    shiny::observeEvent(input$toggle_debug, {
+      if (isTRUE(debug_enabled())) {
+        debug_enabled(FALSE)
+        shiny::updateActionButton(session, 'toggle_debug', label = '🐛 Debug')
+        shinyjs::removeClass('toggle_debug', 'btn-success')
+        shinyjs::addClass('toggle_debug', 'btn-info')
+        shinyjs::hide('debug_output')
+        debug_log(character(0))
+      } else {
+        debug_enabled(TRUE)
+        debug_log(character(0))
+        shiny::updateActionButton(session, 'toggle_debug', label = '🐛 Debug ON')
+        shinyjs::removeClass('toggle_debug', 'btn-info')
+        shinyjs::addClass('toggle_debug', 'btn-success')
+        shinyjs::show('debug_output')
+        append_debug('Debug enabled')
+      }
     })
   }
 
