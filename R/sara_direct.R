@@ -13,6 +13,9 @@ sara_chat <- function(as_background = NULL) {
   # Null coalescing operator
   `%||%` <- function(a, b) if (is.null(a)) b else a
 
+  # Debug logger (set inside server when debug is enabled)
+  debug_logger <- NULL
+
   # Get user-specific port (for consistency, though not used in direct API)
   get_user_port <- function() {
     user <- Sys.info()["user"]
@@ -28,24 +31,370 @@ sara_chat <- function(as_background = NULL) {
   # 1. Search R official manual
   search_r_help <- function(topic) {
     tryCatch({
-      results <- capture.output(help.search(topic, agrep = FALSE))
-      if (length(results) == 0) {
-        return(paste("No help found for:", topic))
+      old_opts <- options(help_type = "text")
+      on.exit(options(old_opts), add = TRUE)
+
+      log_debug <- function(msg) {
+        if (is.function(debug_logger)) debug_logger(msg)
       }
-      return(paste(head(results, 20), collapse = "\n"))
+
+      query_encoded <- utils::URLencode(topic, reserved = TRUE)
+      search_links <- paste(
+        paste0("Search link (R Site Search): https://search.r-project.org/?P=", query_encoded, "&xDB=all&FMT=query"),
+        paste0("Search link (rdrr.io): https://rdrr.io/search?q=", query_encoded),
+        sep = "\n"
+      )
+
+      target_pkg <- ""
+      target_topic <- topic
+      if (grepl("::", topic, fixed = TRUE)) {
+        parts <- strsplit(topic, "::", fixed = TRUE)[[1]]
+        if (length(parts) >= 2) {
+          target_pkg <- parts[1]
+          target_topic <- parts[2]
+        }
+      }
+
+      score_entry <- function(pkg, topic_val, title_val) {
+        s <- 0
+        if (nzchar(target_pkg) && tolower(pkg) == tolower(target_pkg)) s <- s + 5
+        if (nzchar(target_topic) && tolower(topic_val) == tolower(target_topic)) s <- s + 10
+        if (nzchar(target_topic) && nzchar(topic_val) &&
+            grepl(tolower(target_topic), tolower(topic_val), fixed = TRUE)) s <- s + 3
+        if (nzchar(target_topic) && nzchar(title_val) &&
+            grepl(tolower(target_topic), tolower(title_val), fixed = TRUE)) s <- s + 1
+        s
+      }
+
+      results <- utils::help.search(topic, agrep = FALSE, package = NULL)
+      has_local <- !(is.null(results) || is.null(results$matches) || nrow(results$matches) == 0)
+
+      if (has_local) {
+        log_debug(paste0("search_r_help: local matches found for '", topic, "'."))
+        matches <- as.data.frame(results$matches, stringsAsFactors = FALSE)
+        get_col <- function(name) if (name %in% names(matches)) matches[[name]] else rep("", nrow(matches))
+
+        pkg <- get_col("Package")
+        topic_col <- get_col("Topic")
+        title <- get_col("Title")
+        type <- get_col("Type")
+
+        max_show <- min(10, nrow(matches))
+        lines <- character(max_show)
+        for (i in seq_len(max_show)) {
+          pkg_part <- if (nzchar(pkg[i])) paste0(pkg[i], "::") else ""
+          title_part <- if (nzchar(title[i])) paste0(" - ", title[i]) else ""
+          type_part <- if (nzchar(type[i])) paste0(" [", type[i], "]") else ""
+          lines[i] <- paste0(i, ". ", pkg_part, topic_col[i], title_part, type_part)
+        }
+
+        scores <- mapply(score_entry, pkg, topic_col, title)
+        best_idx <- if (length(scores) > 0) which.max(scores) else 1
+        top_topic <- if (length(topic_col) > 0) topic_col[best_idx] else ""
+        top_pkg <- if (length(pkg) > 0) pkg[best_idx] else ""
+        top_help <- if (nzchar(top_pkg)) {
+          paste0("help(\"", top_topic, "\", package = \"", top_pkg, "\")")
+        } else if (nzchar(top_topic)) {
+          paste0("help(\"", top_topic, "\")")
+        } else {
+          ""
+        }
+
+        direct_line <- if (nzchar(top_help)) {
+          paste0("Direct help for top match (local): ", top_help)
+        } else {
+          "Direct help for top match (local): (not available)"
+        }
+
+        excerpt <- NULL
+        if (nzchar(top_pkg) && nzchar(top_topic)) {
+          candidate_urls <- c(
+            paste0("https://search.r-project.org/CRAN/refmans/", top_pkg, "/html/", top_topic, ".html"),
+            paste0("https://search.r-project.org/R/refmans/", top_pkg, "/html/", top_topic, ".html")
+          )
+          for (u in candidate_urls) {
+            excerpt_try <- fetch_help_page(u, focus = topic, max_chars = 1200)
+            if (!grepl("^Error fetching help page", excerpt_try) &&
+                !grepl("^No readable text found", excerpt_try)) {
+              excerpt <- excerpt_try
+              break
+            }
+          }
+        }
+
+        parts <- c(
+          "Help search results (local summary; Help viewer not opened):",
+          paste(lines, collapse = "\n"),
+          direct_line
+        )
+        if (!is.null(excerpt)) parts <- c(parts, excerpt)
+        parts <- c(
+          parts,
+          search_links,
+          "To open full docs manually, use ?topic or help(\"topic\", package = \"pkg\")."
+        )
+        return(paste(parts, collapse = "\n"))
+      }
+
+      # Fallback: online R Site Search (covers all packages)
+      log_debug(paste0("search_r_help: no local matches; attempting online search for '", topic, "'."))
+      online_result <- tryCatch({
+        resp <- httr2::request("https://search.r-project.org/") |>
+          httr2::req_url_query(P = topic, xDB = "all", FMT = "query") |>
+          httr2::req_perform()
+        status <- httr2::resp_status(resp)
+        log_debug(paste0("search_r_help: online search HTTP status ", status, " for '", topic, "'."))
+        if (status >= 400) stop(paste("HTTP", status))
+
+        resp_body <- httr2::resp_body_string(resp)
+        raw_lines <- strsplit(resp_body, "\n", fixed = TRUE)[[1]]
+        entries <- list()
+
+        for (ln in raw_lines) {
+          m <- regexec("<td><b><a href=\"([^\"]+)\">([^<]+)</a></b><br>", ln)
+          parts <- regmatches(ln, m)[[1]]
+          if (length(parts) > 0) {
+            href <- parts[2]
+            title_text <- parts[3]
+            pkg <- ""
+            topic_val <- ""
+            if (grepl("^/CRAN/refmans/[^/]+/html/[^/]+\\.html$", href)) {
+              pkg <- sub("^/CRAN/refmans/([^/]+)/html/.*$", "\\1", href)
+              topic_val <- sub("^/CRAN/refmans/[^/]+/html/([^/]+)\\.html$", "\\1", href)
+            }
+            title_clean <- sub("^R:\\s*", "", title_text)
+            entries[[length(entries) + 1]] <- list(
+              pkg = pkg,
+              topic = topic_val,
+              title = title_clean,
+              href = href
+            )
+          }
+        }
+
+        if (length(entries) == 0) return(NULL)
+
+        scores <- vapply(entries, function(e) {
+          score_entry(e$pkg, e$topic, e$title)
+        }, numeric(1))
+
+        max_show <- min(10, length(entries))
+        out_lines <- character(max_show)
+        for (i in seq_len(max_show)) {
+          e <- entries[[i]]
+          pkg_part <- if (nzchar(e$pkg)) paste0(e$pkg, "::") else ""
+          topic_part <- if (nzchar(e$topic)) e$topic else e$title
+          title_part <- if (nzchar(e$title) && nzchar(e$topic)) paste0(" - ", e$title) else ""
+          out_lines[i] <- paste0(i, ". ", pkg_part, topic_part, title_part)
+        }
+
+        ordered_idx <- order(scores, decreasing = TRUE)
+        best_idx <- if (length(ordered_idx) > 0) ordered_idx[1] else 1
+        best <- entries[[best_idx]]
+        best_score <- if (length(scores) > 0) scores[[best_idx]] else 0
+        top_link <- if (nzchar(best$href)) {
+          paste0("https://search.r-project.org", best$href)
+        } else {
+          ""
+        }
+
+        direct_line <- if (nzchar(top_link)) {
+          paste0("Direct help for top match (online): ", top_link)
+        } else {
+          "Direct help for top match (online): (not available)"
+        }
+
+        excerpts <- character(0)
+        if (length(ordered_idx) > 0) {
+          max_excerpts <- if (best_score < 8 && length(ordered_idx) > 1) 2 else 1
+          used_links <- character(0)
+          for (i in ordered_idx) {
+            e <- entries[[i]]
+            if (!nzchar(e$href)) next
+            link <- paste0("https://search.r-project.org", e$href)
+            if (link %in% used_links) next
+            excerpt_try <- fetch_help_page(link, focus = topic, max_chars = 800)
+            if (!grepl("^Error fetching help page", excerpt_try) &&
+                !grepl("^No readable text found", excerpt_try)) {
+              excerpts <- c(excerpts, excerpt_try)
+              used_links <- c(used_links, link)
+            }
+            if (length(excerpts) >= max_excerpts) break
+          }
+        }
+
+        log_debug(paste0("search_r_help: online search returned ", length(entries), " result(s)."))
+        parts <- c(
+          "Help search results (online summary; Help viewer not opened):",
+          paste(out_lines, collapse = "\n"),
+          direct_line
+        )
+        if (length(excerpts) > 0) parts <- c(parts, excerpts)
+        parts <- c(
+          parts,
+          search_links,
+          "Note: install the package to access local help."
+        )
+        paste(parts, collapse = "\n")
+      }, error = function(e) {
+        log_debug(paste0("search_r_help: online search failed for '", topic, "': ", e$message))
+        NULL
+      })
+
+      if (!is.null(online_result)) {
+        return(online_result)
+      }
+
+      return(paste(
+        paste("No help found for:", topic),
+        search_links,
+        sep = "\n"
+      ))
     }, error = function(e) {
       return(paste("Error searching help:", e$message))
+    })
+  }
+
+  # 1b. Fetch and summarize an R help page (online)
+  fetch_help_page <- function(url, focus = NULL, max_chars = 2400) {
+    tryCatch({
+      log_debug <- function(msg) {
+        if (is.function(debug_logger)) debug_logger(msg)
+      }
+      log_debug(paste0("fetch_help_page: fetching ", url))
+
+      resp <- httr2::request(url) |>
+        httr2::req_perform()
+      status <- httr2::resp_status(resp)
+      log_debug(paste0("fetch_help_page: HTTP status ", status))
+      if (status >= 400) {
+        return(paste("Error fetching help page (HTTP", status, "):", url))
+      }
+
+      html <- httr2::resp_body_string(resp)
+      # Strip scripts/styles and tags
+      html <- gsub("<script[\\s\\S]*?</script>", " ", html, ignore.case = TRUE)
+      html <- gsub("<style[\\s\\S]*?</style>", " ", html, ignore.case = TRUE)
+      text <- gsub("<[^>]+>", " ", html)
+      # Decode common HTML entities
+      text <- gsub("&quot;", "\"", text, fixed = TRUE)
+      text <- gsub("&amp;", "&", text, fixed = TRUE)
+      text <- gsub("&lt;", "<", text, fixed = TRUE)
+      text <- gsub("&gt;", ">", text, fixed = TRUE)
+      text <- gsub("&nbsp;", " ", text, fixed = TRUE)
+      # Normalize whitespace
+      text <- gsub("[ \t]+", " ", text)
+      text <- gsub("\r", "\n", text)
+      text <- gsub("\n{2,}", "\n", text)
+      lines <- trimws(unlist(strsplit(text, "\n", fixed = TRUE)))
+      lines <- lines[nzchar(lines)]
+
+      if (length(lines) == 0) {
+        return(paste("No readable text found at:", url))
+      }
+
+      headings <- c("Description", "Usage", "Arguments", "Value", "Details", "Examples", "See Also")
+      idx <- which(lines %in% headings)
+      picked <- character(0)
+
+      if (length(idx) > 0) {
+        for (i in seq_along(idx)) {
+          start <- idx[i] + 1
+          end <- if (i < length(idx)) idx[i + 1] - 1 else min(length(lines), start + 40)
+          section <- lines[start:end]
+          if (length(section) > 0) {
+            picked <- c(picked, headings[which(lines[idx[i]] == headings)], section)
+          }
+          if (length(picked) > 200) break
+        }
+      } else {
+        picked <- head(lines, 80)
+      }
+
+      # Apply focus filter lightly (keep lines containing focus keywords)
+      if (!is.null(focus) && nzchar(focus)) {
+        focus_terms <- unique(unlist(strsplit(tolower(focus), "[^a-z0-9_]+")))
+        focus_terms <- focus_terms[nzchar(focus_terms)]
+        if (length(focus_terms) > 0) {
+          keep <- vapply(picked, function(l) {
+            any(vapply(focus_terms, function(t) grepl(t, tolower(l), fixed = TRUE), logical(1)))
+          }, logical(1))
+          if (any(keep)) {
+            picked <- picked[keep]
+          }
+        }
+      }
+
+      out <- paste(picked, collapse = "\n")
+      if (nchar(out) > max_chars) {
+        out <- substr(out, 1, max_chars)
+        out <- paste0(out, "\n[truncated]")
+      }
+
+      return(paste(
+        "Help page excerpt (parsed text):",
+        out,
+        paste0("Source: ", url),
+        sep = "\n"
+      ))
+    }, error = function(e) {
+      return(paste("Error fetching help page:", e$message))
     })
   }
 
   # 2. Search R extensions/packages
   search_r_packages <- function(keyword) {
     tryCatch({
-      results <- capture.output(help.search(keyword, agrep = FALSE, package = NULL))
-      if (length(results) == 0) {
-        return(paste("No packages found for:", keyword))
+      old_opts <- options(help_type = "text")
+      on.exit(options(old_opts), add = TRUE)
+
+      query_encoded <- utils::URLencode(keyword, reserved = TRUE)
+      search_links <- paste(
+        paste0("Search link (R Site Search): https://search.r-project.org/?P=", query_encoded, "&xDB=all&FMT=query"),
+        paste0("Search link (rdrr.io): https://rdrr.io/search?q=", query_encoded),
+        sep = "\n"
+      )
+
+      results <- utils::help.search(keyword, agrep = FALSE, package = NULL)
+      if (is.null(results) || is.null(results$matches) || nrow(results$matches) == 0) {
+        return(paste(
+          paste("No packages found for:", keyword),
+          search_links,
+          sep = "\n"
+        ))
       }
-      return(paste(head(results, 20), collapse = "\n"))
+
+      matches <- as.data.frame(results$matches, stringsAsFactors = FALSE)
+      if (!"Package" %in% names(matches)) {
+        return(paste(
+          paste("No packages found for:", keyword),
+          search_links,
+          sep = "\n"
+        ))
+      }
+
+      pkg_counts <- sort(table(matches$Package), decreasing = TRUE)
+      pkg_names <- names(pkg_counts)
+      max_show <- min(10, length(pkg_names))
+      lines <- character(max_show)
+      for (i in seq_len(max_show)) {
+        lines[i] <- paste0(i, ". ", pkg_names[i], " (", pkg_counts[[i]], " topic", if (pkg_counts[[i]] == 1) "" else "s", ")")
+      }
+
+      top_pkg <- if (length(pkg_names) > 0) pkg_names[1] else ""
+      direct_line <- if (nzchar(top_pkg)) {
+        paste0("Direct package page (top match): https://cran.r-project.org/package=", top_pkg)
+      } else {
+        "Direct package page (top match): (not available)"
+      }
+
+      return(paste(
+        "Package search results (local summary; Help viewer not opened):",
+        paste(lines, collapse = "\n"),
+        direct_line,
+        search_links,
+        sep = "\n"
+      ))
     }, error = function(e) {
       return(paste("Error searching packages:", e$message))
     })
@@ -212,6 +561,31 @@ sara_chat <- function(as_background = NULL) {
       list(
         type = "function",
         `function` = list(
+          name = "fetch_help_page",
+          description = "Fetch and extract readable text from an online R help page URL and return a short excerpt",
+          parameters = list(
+            type = "object",
+            properties = list(
+              url = list(
+                type = "string",
+                description = "Full URL of the help page to fetch"
+              ),
+              focus = list(
+                type = "string",
+                description = "Optional: a short phrase about what the user wants; used to filter relevant lines"
+              ),
+              max_chars = list(
+                type = "integer",
+                description = "Maximum number of characters to return (default: 2400)"
+              )
+            ),
+            required = list("url")
+          )
+        )
+      ),
+      list(
+        type = "function",
+        `function` = list(
           name = "run_batch_classify",
           description = "Perform semantic analysis on a dataframe column and add results as a new column. Use this for classification, sentiment analysis, urgency detection, or any task requiring understanding of text meaning (not just keywords).",
           parameters = list(
@@ -227,7 +601,7 @@ sara_chat <- function(as_background = NULL) {
               ),
               task_prompt = list(
                 type = "string",
-                description = "Description of the analysis task, e.g. 'Determine if this comment is urgent and needs immediate attention'"
+                description = "Description of the analysis task and expected output format. Must specify both the task and the output values clearly."
               ),
               result_column = list(
                 type = "string",
@@ -249,6 +623,11 @@ sara_chat <- function(as_background = NULL) {
   execute_tool <- function(tool_name, tool_args) {
     result <- switch(tool_name,
       "search_r_help" = search_r_help(tool_args$topic),
+      "fetch_help_page" = fetch_help_page(
+        url = tool_args$url,
+        focus = tool_args$focus %||% NULL,
+        max_chars = tool_args$max_chars %||% 2400
+      ),
       "search_r_packages" = search_r_packages(tool_args$keyword),
       "run_batch_classify" = run_batch_classify(
         df_name = tool_args$df_name,
@@ -269,37 +648,54 @@ sara_chat <- function(as_background = NULL) {
   get_system_prompt <- function() {
     "USE_CUSTOM_INSTRUCTIONS
 
-Use the 'Tidy Modeling with R' (https://www.tmwr.org/) book as main reference
-Use the 'R for Data Science' (https://r4ds.had.co.nz/) book as main reference
-Use tidyverse packages: readr, ggplot2, dplyr, tidyr
-For models, use tidymodels packages: recipes, parsnip, yardstick, workflows, broom
-Avoid explanations unless requested by user, expecting code only
+ROLE
+You are a helpful R assistant focused on tidyverse and tidymodels.
 
-You are a helpful coding assistant that uses R and the tidyverse
+REFERENCES
+Use 'Tidy Modeling with R' (https://www.tmwr.org/) and 'R for Data Science' (https://r4ds.had.co.nz/) as primary references.
 
-AVAILABLE TOOLS:
-You have access to these helper functions you can call yourself:
+PREFERRED PACKAGES
+tidyverse: readr, ggplot2, dplyr, tidyr
+tidymodels: recipes, parsnip, yardstick, workflows, broom
 
-1. search_r_help(topic) - Search R official documentation
-2. search_r_packages(keyword) - Search R packages/extensions
-3. run_batch_classify() - Perform semantic text analysis on dataframe columns
+OUTPUT
+- Default: code only, no explanations.
+- If the user asks for a script or code, return a complete, runnable R script.
+- If the user asks \"how can I\" (or similar), show the relevant function/code and add a brief explanation.
 
-When you're unsure about R functions or packages, use search_r_help() or search_r_packages().
+TOOLS
+Available tools:
+1. search_r_help(topic)
+2. search_r_packages(keyword)
+3. fetch_help_page(url, focus, max_chars)
+4. run_batch_classify()
 
-USER CONTEXT: The user can share their R script or dataframes with you using the buttons or /script and /data commands. When they do, the context will appear in their message.
+Use search_r_help() / search_r_packages() only when you are unsure about an R function or package.
 
-SEMANTIC ANALYSIS: When users ask you to semantically analyze text in dataframes (classify, score, categorize based on meaning, not keywords), use run_batch_classify():
+HELP PAGES
+If the user asks for help or details about a function/package, you must:
+1) Use search_r_help() to find candidates.
+2) Read the most relevant help page excerpt (use fetch_help_page()).
+3) Provide a 1-2 sentence concept intro if the user asked a general \"what is\" or broad topic (e.g., \"machine learning models\").
+4) Summarize the excerpt in a short paragraph (2–4 sentences) plus 4–8 bullets tailored to the user’s question.
+5) If the excerpt does not fit the use-case, search again with a refined query and repeat.
+6) Provide a short coding example where applicable.
+Always include the best matching help link, but do not dump long excerpts.
 
-1. Ask the user to share their data using /data or the Add Data button if not already provided
-2. Then call run_batch_classify() providing:
-   - df_name: the dataframe name
-   - column_name: the text column to analyze
-   - task_prompt: Clear instruction that specifies BOTH the analysis task AND the expected output format based on user's request
-   - result_column: appropriate column name based on user's request
+USER CONTEXT
+The user can share their R script or dataframes via /script or /data (or the UI buttons). Use that context when provided.
 
-CRITICAL: Your task_prompt must explicitly specify what values to return. If user says 'set to 1 if urgent', use 'Return 1 if urgent, otherwise 0'. If user says 'categorize', specify the categories. Match the user's intent for output format.
+SEMANTIC ANALYSIS (TEXT IN DATAFRAMES)
+Use run_batch_classify() only when the user asks for semantic analysis (classify/score/categorize by meaning).
+Steps:
+1. Ask for /data if not already provided.
+2. Call run_batch_classify() with:
+   - df_name
+   - column_name
+   - task_prompt (must specify the task AND exact output values)
+   - result_column (name for output)
 
-IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do NOT suggest keyword-based regex or grepl solutions."
+CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if urgent, otherwise 0\"). Do not use keyword-based regex/grepl for semantic tasks."
   }
 
   # ============================================================================
@@ -308,6 +704,41 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
 
   call_ollama_with_tools <- function(messages, tools = NULL, max_iterations = 3, status_callback = NULL, debug = FALSE, debug_callback = NULL) {
     iteration <- 0
+    tools_used <- FALSE
+
+    finalize_without_tools <- function(final_messages) {
+      if (!is.null(status_callback)) {
+        status_callback("Finalizing response...")
+      }
+      tryCatch({
+        final_messages[[length(final_messages) + 1]] <- list(
+          role = "system",
+          content = "Tool calls are complete. Provide the final response now. Do not call tools."
+        )
+        body <- list(
+          model = "sara",
+          messages = final_messages,
+          stream = FALSE
+        )
+        response <- httr2::request("http://127.0.0.1:11434/api/chat") |>
+          httr2::req_body_json(body, auto_unbox = TRUE) |>
+          httr2::req_perform() |>
+          httr2::resp_body_json()
+        message_content <- response$message
+        thinking <- message_content$thinking %||% message_content$reasoning %||% NULL
+        if (!is.null(thinking) && !nzchar(trimws(thinking))) thinking <- NULL
+        return(list(
+          content = message_content$content %||% "Maximum tool calling iterations reached.",
+          thinking = thinking,
+          messages = messages
+        ))
+      }, error = function(e) {
+        return(list(
+          content = "Maximum tool calling iterations reached.",
+          messages = messages
+        ))
+      })
+    }
 
     while (iteration < max_iterations) {
       iteration <- iteration + 1
@@ -323,8 +754,8 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
           stream = FALSE
         )
 
-        # Add tools if provided
-        if (!is.null(tools) && length(tools) > 0) {
+        # Add tools only for the first tool-eligible pass
+        if (!tools_used && !is.null(tools) && length(tools) > 0) {
           body$tools <- tools
         }
 
@@ -334,15 +765,37 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
           httr2::resp_body_json()
 
         message_content <- response$message
+        thinking <- message_content$thinking %||% message_content$reasoning %||% NULL
+
+        # Extract <think>...</think> if model embeds it in content
+        if (is.null(thinking) && !is.null(message_content$content) &&
+            grepl("<think>", message_content$content, fixed = TRUE)) {
+          think_match <- regmatches(
+            message_content$content,
+            regexec("(?s)<think>(.*?)</think>", message_content$content, perl = TRUE)
+          )[[1]]
+          if (length(think_match) >= 2) {
+            thinking <- trimws(think_match[2])
+            message_content$content <- trimws(gsub("(?s)<think>.*?</think>", "", message_content$content, perl = TRUE))
+          }
+        }
+        if (!is.null(thinking) && !nzchar(trimws(thinking))) {
+          thinking <- NULL
+        }
 
         # Check if model wants to call a tool
         if (!is.null(message_content$tool_calls) && length(message_content$tool_calls) > 0) {
+          if (tools_used) {
+            # Prevent repeated tool loops: finalize without more tools
+            return(finalize_without_tools(messages))
+          }
 
           # Add assistant's tool call message to history
           messages[[length(messages) + 1]] <- list(
             role = "assistant",
             content = "",
-            tool_calls = message_content$tool_calls
+            tool_calls = message_content$tool_calls,
+            thinking = thinking %||% NULL
           )
 
           # Execute each tool call
@@ -371,6 +824,7 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
             )
           }
 
+          tools_used <- TRUE
           # Continue loop to get final response
           next
 
@@ -382,6 +836,7 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
 
           return(list(
             content = message_content$content %||% "",
+            thinking = thinking %||% NULL,
             messages = messages
           ))
         }
@@ -397,11 +852,8 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
       })
     }
 
-    # Max iterations reached
-    return(list(
-      content = "Maximum tool calling iterations reached.",
-      messages = messages
-    ))
+    # Max iterations reached: attempt a final response without tools
+    return(finalize_without_tools(messages))
   }
 
   # ============================================================================
@@ -451,6 +903,40 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
         }
         @keyframes sara_spin {
           to { transform: rotate(360deg); }
+        }
+        details.sara-intermediate > summary,
+        details.sara-tool-output > summary {
+          color: #8a8a8a;
+          font-size: 0.85em;
+          opacity: 0.85;
+          cursor: pointer;
+          list-style: none;
+        }
+        details.sara-intermediate > summary::-webkit-details-marker,
+        details.sara-tool-output > summary::-webkit-details-marker {
+          display: none;
+        }
+        details.sara-intermediate,
+        details.sara-tool-output {
+          margin: 6px 0;
+        }
+        details.sara-intermediate[open] {
+          padding: 6px;
+          background: #f7f7ff;
+          border: 1px solid #d8d8ff;
+          border-radius: 4px;
+        }
+        details.sara-tool-output[open] {
+          padding: 8px;
+          background: #f1f3f5;
+          border: 1px dashed #bbb;
+          border-radius: 5px;
+        }
+        details.sara-intermediate:not([open]),
+        details.sara-tool-output:not([open]) {
+          padding: 0;
+          border: none;
+          background: transparent;
         }
       ")
     )),
@@ -520,11 +1006,22 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
     ),
 
     shiny::tags$script(shiny::HTML("
+      function submitUserInput() {
+        var val = $('#user_input').val();
+        if (window.Shiny && Shiny.setInputValue) {
+          Shiny.setInputValue('user_input_submit', val, {priority: 'event'});
+        }
+      }
+
       $(document).on('keydown', '#user_input', function(e) {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
-          $('#send').click();
+          submitUserInput();
         }
+      });
+
+      $(document).on('click', '#send', function() {
+        submitUserInput();
       });
 
       function scrollToBottom() {
@@ -567,6 +1064,9 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
       current_debug[[length(current_debug) + 1]] <- paste0("[", timestamp, "] ", msg)
       debug_log(current_debug)
     }
+
+    # Expose debug logger to helper functions
+    debug_logger <<- append_debug
 
     contains_forbidden_language <- function(text) {
       if (is.null(text) || !nzchar(text)) return(FALSE)
@@ -669,18 +1169,42 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
             )
           }
 
+          thinking_info <- NULL
+          if (!is.null(msg$thinking) && nzchar(trimws(msg$thinking))) {
+            thinking_text <- trimws(msg$thinking)
+            if (nchar(thinking_text) > 2000) {
+              thinking_text <- paste0(substr(thinking_text, 1, 2000), "\n[truncated]")
+            }
+            thinking_info <- shiny::tags$details(
+              class = "sara-intermediate",
+              shiny::tags$summary("Intermediate"),
+              shiny::tags$div(
+                style = "margin-top: 6px;",
+                shiny::tags$pre(style = "margin: 4px 0; white-space: pre-wrap; font-size: 0.85em;", thinking_text)
+              )
+            )
+          }
+
           shiny::div(
             style = "margin: 10px 0; padding: 10px; background: #fff; border: 1px solid #ddd; border-radius: 5px;",
             shiny::tags$strong("SARA:"),
             tool_info,
-            shiny::tags$pre(style = "margin: 5px 0; white-space: pre-wrap;", msg$content)
+            thinking_info,
+            if (!is.null(msg$content) && nzchar(trimws(msg$content))) {
+              shiny::tags$pre(style = "margin: 5px 0; white-space: pre-wrap;", msg$content)
+            }
           )
         } else if (msg$role == "tool") {
-          shiny::div(
-            style = "margin: 8px 0; padding: 8px; background: #f1f3f5; border: 1px dashed #bbb; border-radius: 5px;",
-            shiny::tags$strong("Tool output:"),
-            shiny::tags$pre(style = "margin: 5px 0; white-space: pre-wrap; font-size: 0.9em;", msg$content)
-          )
+          if (!is.null(msg$content) && nzchar(trimws(msg$content))) {
+            shiny::tags$details(
+              class = "sara-tool-output",
+              shiny::tags$summary("Tool output"),
+              shiny::tags$div(
+                style = "margin-top: 6px;",
+                shiny::tags$pre(style = "margin: 5px 0; white-space: pre-wrap; font-size: 0.9em;", msg$content)
+              )
+            )
+          }
         }
       })
 
@@ -688,9 +1212,9 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
     })
 
     # Send message
-    shiny::observeEvent(input$send, {
-      shiny::req(input$user_input)
-      user_msg <- input$user_input
+    shiny::observeEvent(input$user_input_submit, {
+      shiny::req(input$user_input_submit)
+      user_msg <- input$user_input_submit
 
       if (nchar(trimws(user_msg)) == 0) return()
 
@@ -836,7 +1360,8 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
         current_history <- chat_history()
         current_history[[length(current_history) + 1]] <- list(
           role = "assistant",
-          content = result$content
+          content = result$content,
+          thinking = result$thinking %||% NULL
         )
         chat_history(current_history)
       }
