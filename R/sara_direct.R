@@ -5,10 +5,9 @@
 #' @export
 sara_chat <- function(as_background = NULL) {
 
-  # Auto-detect: run as background by default in RStudio
+  # Run in foreground by default to enable live rstudioapi access
   if (is.null(as_background)) {
-    as_background <- requireNamespace("rstudioapi", quietly = TRUE) && 
-                     rstudioapi::isAvailable()
+    as_background <- FALSE
   }
 
   # Null coalescing operator
@@ -96,7 +95,25 @@ sara_chat <- function(as_background = NULL) {
       context <- rstudioapi::getActiveDocumentContext()
 
       if (is.null(context) || is.null(context$contents) || length(context$contents) == 0) {
-        return("No active R script found")
+        # Fallback to source editor context (sometimes more reliable in RStudio Server)
+        context <- rstudioapi::getSourceEditorContext()
+      }
+
+      if (is.null(context) || is.null(context$contents) || length(context$contents) == 0) {
+        # Final fallback: scan open documents
+        docs <- tryCatch(rstudioapi::documentList(), error = function(e) NULL)
+        if (!is.null(docs) && length(docs) > 0) {
+          for (doc in docs) {
+            if (!is.null(doc$contents) && length(doc$contents) > 0) {
+              context <- doc
+              break
+            }
+          }
+        }
+      }
+
+      if (is.null(context) || is.null(context$contents) || length(context$contents) == 0) {
+        return("No active R script found (make sure an R script tab is focused)")
       }
 
       script_content <- paste(context$contents, collapse = "\n")
@@ -195,28 +212,6 @@ sara_chat <- function(as_background = NULL) {
       list(
         type = "function",
         `function` = list(
-          name = "get_user_dataframes",
-          description = "Retrieve all dataframes from the user's R environment with structure and preview",
-          parameters = list(
-            type = "object",
-            properties = structure(list(), names = character(0))  # Empty named list = {}
-          )
-        )
-      ),
-      list(
-        type = "function",
-        `function` = list(
-          name = "get_user_script",
-          description = "Retrieve the user's currently active R script from the editor",
-          parameters = list(
-            type = "object",
-            properties = structure(list(), names = character(0))  # Empty named list = {}
-          )
-        )
-      ),
-      list(
-        type = "function",
-        `function` = list(
           name = "run_batch_classify",
           description = "Perform semantic analysis on a dataframe column and add results as a new column. Use this for classification, sentiment analysis, urgency detection, or any task requiring understanding of text meaning (not just keywords).",
           parameters = list(
@@ -255,8 +250,6 @@ sara_chat <- function(as_background = NULL) {
     result <- switch(tool_name,
       "search_r_help" = search_r_help(tool_args$topic),
       "search_r_packages" = search_r_packages(tool_args$keyword),
-      "get_user_dataframes" = get_user_dataframes(),
-      "get_user_script" = get_user_script(),
       "run_batch_classify" = run_batch_classify(
         df_name = tool_args$df_name,
         column_name = tool_args$column_name,
@@ -289,16 +282,15 @@ You have access to these helper functions you can call yourself:
 
 1. search_r_help(topic) - Search R official documentation
 2. search_r_packages(keyword) - Search R packages/extensions
-3. get_user_dataframes() - Retrieve all dataframes from user's environment
-4. get_user_script() - Get the user's currently open R script
-5. run_batch_classify() - Perform semantic text analysis on dataframe columns
+3. run_batch_classify() - Perform semantic text analysis on dataframe columns
 
-When a user asks about data or scripts you don't have context for, use get_user_dataframes() or get_user_script() to retrieve it yourself.
 When you're unsure about R functions or packages, use search_r_help() or search_r_packages().
+
+USER CONTEXT: The user can share their R script or dataframes with you using the buttons or /script and /data commands. When they do, the context will appear in their message.
 
 SEMANTIC ANALYSIS: When users ask you to semantically analyze text in dataframes (classify, score, categorize based on meaning, not keywords), use run_batch_classify():
 
-1. First call get_user_dataframes() to see the data structure
+1. Ask the user to share their data using /data or the Add Data button if not already provided
 2. Then call run_batch_classify() providing:
    - df_name: the dataframe name
    - column_name: the text column to analyze
@@ -413,6 +405,32 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
   }
 
   # ============================================================================
+  # CONTEXT CAPTURE AT STARTUP (while rstudioapi is available)
+  # ============================================================================
+
+  # Capture script and dataframes at startup - these will be refreshed on button click
+  cached_script <- list(content = NULL, name = NULL, time = NULL)
+  cached_dataframes <- list(content = NULL, time = NULL)
+
+  # Try to capture script at startup
+  tryCatch({
+    if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+      context <- rstudioapi::getActiveDocumentContext()
+      if (!is.null(context) && !is.null(context$contents) && length(context$contents) > 0) {
+        cached_script$content <- paste(context$contents, collapse = "\n")
+        cached_script$name <- ifelse(nzchar(context$path), basename(context$path), "Untitled")
+        cached_script$time <- Sys.time()
+      }
+    }
+  }, error = function(e) NULL)
+
+  # Try to capture dataframes at startup
+  tryCatch({
+    cached_dataframes$content <- get_user_dataframes()
+    cached_dataframes$time <- Sys.time()
+  }, error = function(e) NULL)
+
+  # ============================================================================
   # SHINY UI
   # ============================================================================
 
@@ -449,7 +467,9 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
 
     shiny::fluidRow(
       shiny::column(12,
-        shiny::actionButton("clear_chat", "🗑️ Clear Chat", class = "btn-warning"),
+        shiny::actionButton("add_script", "📄 Add Script", class = "btn-primary"),
+        shiny::actionButton("add_data", "📊 Add Data", class = "btn-primary", style = "margin-left: 10px;"),
+        shiny::actionButton("clear_chat", "🗑️ Clear Chat", class = "btn-warning", style = "margin-left: 20px;"),
         shiny::actionButton("close_app", "✖️ Close SARA", class = "btn-danger", style = "margin-left: 10px;"),
         shiny::actionButton("toggle_debug", "🐛 Debug", class = "btn-info", style = "margin-left: 10px;"),
         shiny::hr()
@@ -483,9 +503,15 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
     ),
 
     shiny::fluidRow(
+      shiny::column(12,
+        shiny::uiOutput("pending_context_indicator")
+      )
+    ),
+
+    shiny::fluidRow(
       shiny::column(10,
         shiny::textInput("user_input", NULL,
-                        placeholder = "Ask SARA anything... She can search R help and retrieve your data automatically!",
+                        placeholder = "Ask SARA anything... Use /script or /data to add context, or click the buttons above.",
                         width = "100%")
       ),
       shiny::column(2,
@@ -556,6 +582,9 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
     # Status message for showing what SARA is doing
     status_msg <- shiny::reactiveVal("")
 
+    # Pending context to be added to next message
+    pending_context <- shiny::reactiveVal(NULL)
+
     # Render status message
     output$status_message <- shiny::renderUI({
       msg <- status_msg()
@@ -575,18 +604,52 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
       }
     })
 
+    # Render pending context indicator (sticky badge above input)
+    output$pending_context_indicator <- shiny::renderUI({
+      ctx <- pending_context()
+      if (!is.null(ctx)) {
+        # Determine if it's script or data
+        if (grepl("USER'S R SCRIPT", ctx)) {
+          label <- "📄 Script attached"
+          bg_color <- "#e3f2fd"
+          border_color <- "#2196f3"
+        } else {
+          label <- "📊 Data attached"
+          bg_color <- "#e8f5e9"
+          border_color <- "#4caf50"
+        }
+        shiny::div(
+          style = sprintf(
+            "display: inline-flex; align-items: center; padding: 4px 10px; margin-bottom: 5px; background: %s; border: 1px solid %s; border-radius: 15px; font-size: 0.85em;",
+            bg_color, border_color
+          ),
+          shiny::tags$span(label),
+          shiny::actionLink(
+            "clear_pending_context",
+            shiny::tags$span(style = "margin-left: 8px; color: #999; font-weight: bold;", "✕"),
+            style = "text-decoration: none;"
+          )
+        )
+      }
+    })
+
+    # Clear pending context when X is clicked
+    shiny::observeEvent(input$clear_pending_context, {
+      pending_context(NULL)
+      shiny::showNotification("Context cleared.", type = "message", duration = 2)
+    })
+
     # Render chat history
     output$chat_history <- shiny::renderUI({
       messages <- chat_history()
 
       if (length(messages) <= 1) {
         return(shiny::p(style = "color: #999;",
-                       "Start chatting with SARA... She can search R help, retrieve data/scripts, and perform semantic analysis automatically!"))
+                       "Start chatting with SARA! Use /script or /data (or the buttons above) to share your code or data with her."))
       }
 
-      # Skip system message and tool messages in display
+      # Skip system message
       display_messages <- messages[-1]
-      display_messages <- Filter(function(msg) msg$role != "tool", display_messages)
 
       ui_messages <- lapply(display_messages, function(msg) {
         if (msg$role == "user") {
@@ -612,6 +675,12 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
             tool_info,
             shiny::tags$pre(style = "margin: 5px 0; white-space: pre-wrap;", msg$content)
           )
+        } else if (msg$role == "tool") {
+          shiny::div(
+            style = "margin: 8px 0; padding: 8px; background: #f1f3f5; border: 1px dashed #bbb; border-radius: 5px;",
+            shiny::tags$strong("Tool output:"),
+            shiny::tags$pre(style = "margin: 5px 0; white-space: pre-wrap; font-size: 0.9em;", msg$content)
+          )
         }
       })
 
@@ -624,6 +693,86 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
       user_msg <- input$user_input
 
       if (nchar(trimws(user_msg)) == 0) return()
+
+      # Handle /script command
+      if (grepl("^/script\\b", trimws(user_msg), ignore.case = TRUE)) {
+        script_content <- NULL
+        script_name <- "Unknown"
+
+        # Try to get fresh script
+        tryCatch({
+          if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+            context <- rstudioapi::getActiveDocumentContext()
+            if (!is.null(context) && !is.null(context$contents) && length(context$contents) > 0) {
+              script_content <- paste(context$contents, collapse = "\n")
+              script_name <- ifelse(nzchar(context$path), basename(context$path), "Untitled")
+              cached_script$content <<- script_content
+              cached_script$name <<- script_name
+              cached_script$time <<- Sys.time()
+            }
+          }
+        }, error = function(e) NULL)
+
+        # Fall back to cached
+        if (is.null(script_content) && !is.null(cached_script$content)) {
+          script_content <- cached_script$content
+          script_name <- cached_script$name %||% "Cached Script"
+        }
+
+        if (!is.null(script_content)) {
+          # Remove /script from message and prepend context
+          remaining_msg <- trimws(sub("^/script\\s*", "", user_msg, ignore.case = TRUE))
+          if (nchar(remaining_msg) == 0) remaining_msg <- "Please review my script."
+          user_msg <- sprintf(
+            "[USER'S R SCRIPT: %s]\n```r\n%s\n```\n\n%s",
+            script_name, script_content, remaining_msg
+          )
+        } else {
+          shiny::showNotification("No script found.", type = "error", duration = 3)
+          return()
+        }
+      }
+
+      # Handle /data command
+      if (grepl("^/data\\b", trimws(user_msg), ignore.case = TRUE)) {
+        data_content <- NULL
+
+        # Try to get fresh dataframes
+        tryCatch({
+          data_content <- get_user_dataframes()
+          if (!is.null(data_content) && !grepl("No dataframes found", data_content)) {
+            cached_dataframes$content <<- data_content
+            cached_dataframes$time <<- Sys.time()
+          } else {
+            data_content <- NULL
+          }
+        }, error = function(e) NULL)
+
+        # Fall back to cached
+        if (is.null(data_content) && !is.null(cached_dataframes$content) &&
+            !grepl("No dataframes found", cached_dataframes$content)) {
+          data_content <- cached_dataframes$content
+        }
+
+        if (!is.null(data_content) && !grepl("No dataframes found", data_content)) {
+          remaining_msg <- trimws(sub("^/data\\s*", "", user_msg, ignore.case = TRUE))
+          if (nchar(remaining_msg) == 0) remaining_msg <- "Please review my data."
+          user_msg <- sprintf(
+            "[USER'S R DATAFRAMES]\n%s\n\n%s",
+            data_content, remaining_msg
+          )
+        } else {
+          shiny::showNotification("No dataframes found.", type = "error", duration = 3)
+          return()
+        }
+      }
+
+      # Include any pending context from button clicks
+      ctx <- pending_context()
+      if (!is.null(ctx)) {
+        user_msg <- paste0(ctx, "\n\n", user_msg)
+        pending_context(NULL)  # Clear pending context
+      }
 
       # Add user message
       current_history <- chat_history()
@@ -698,11 +847,105 @@ IMPORTANT: For semantic text analysis, ALWAYS use run_batch_classify() tool. Do 
       shinyjs::enable("send")
     })
 
+    # Add Script button - captures and queues script context
+    shiny::observeEvent(input$add_script, {
+      script_content <- NULL
+      script_name <- "Unknown"
+
+      # Try to get fresh script from rstudioapi
+      tryCatch({
+        if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+          context <- rstudioapi::getActiveDocumentContext()
+          if (!is.null(context) && !is.null(context$contents) && length(context$contents) > 0) {
+            script_content <- paste(context$contents, collapse = "\n")
+            script_name <- ifelse(nzchar(context$path), basename(context$path), "Untitled")
+            # Update cache
+            cached_script$content <<- script_content
+            cached_script$name <<- script_name
+            cached_script$time <<- Sys.time()
+          }
+        }
+      }, error = function(e) NULL)
+
+      # Fall back to cached script
+      if (is.null(script_content) && !is.null(cached_script$content)) {
+        script_content <- cached_script$content
+        script_name <- cached_script$name %||% "Cached Script"
+        shiny::showNotification(
+          paste0("Using cached script from ", format(cached_script$time, "%H:%M:%S")),
+          type = "warning", duration = 3
+        )
+      }
+
+      if (!is.null(script_content)) {
+        context_text <- sprintf(
+          "[USER'S R SCRIPT: %s]\n```r\n%s\n```",
+          script_name, script_content
+        )
+        pending_context(context_text)
+        shiny::showNotification(
+          paste0("📄 Script '", script_name, "' ready to send. Type your question and press Send."),
+          type = "message", duration = 3
+        )
+        # Focus on input
+        shinyjs::runjs("$('#user_input').focus();")
+      } else {
+        shiny::showNotification(
+          "No script found. Please open an R script in RStudio first.",
+          type = "error", duration = 3
+        )
+      }
+    })
+
+    # Add Data button - captures and queues dataframe context
+    shiny::observeEvent(input$add_data, {
+      data_content <- NULL
+
+      # Try to get fresh dataframes
+      tryCatch({
+        data_content <- get_user_dataframes()
+        if (!is.null(data_content) && !grepl("No dataframes found", data_content)) {
+          # Update cache
+          cached_dataframes$content <<- data_content
+          cached_dataframes$time <<- Sys.time()
+        } else {
+          data_content <- NULL
+        }
+      }, error = function(e) NULL)
+
+      # Fall back to cached dataframes
+      if (is.null(data_content) && !is.null(cached_dataframes$content) &&
+          !grepl("No dataframes found", cached_dataframes$content)) {
+        data_content <- cached_dataframes$content
+        shiny::showNotification(
+          paste0("Using cached data from ", format(cached_dataframes$time, "%H:%M:%S")),
+          type = "warning", duration = 3
+        )
+      }
+
+      if (!is.null(data_content) && !grepl("No dataframes found", data_content)) {
+        context_text <- sprintf("[USER'S R DATAFRAMES]\n%s", data_content)
+        pending_context(context_text)
+        shiny::showNotification(
+          "📊 Dataframe info ready to send. Type your question and press Send.",
+          type = "message", duration = 3
+        )
+        # Focus on input
+        shinyjs::runjs("$('#user_input').focus();")
+      } else {
+        shiny::showNotification(
+          "No dataframes found in your R environment.",
+          type = "error", duration = 3
+        )
+      }
+    })
+
     # Clear chat
     shiny::observeEvent(input$clear_chat, {
       chat_history(list(
         list(role = "system", content = get_system_prompt())
       ))
+      pending_context(NULL)
       status_msg("")
       shiny::showNotification("Chat cleared!", type = "message", duration = 2)
     })
