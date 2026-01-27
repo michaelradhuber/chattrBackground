@@ -13,7 +13,7 @@ chattrBackground/
 │   └── rstudio/
 │       └── addins.dcf      # RStudio addin: "SARA Chat (AI Assistant)"
 └── R/
-    └── sara_direct.R       # Main implementation (612 lines)
+    └── sara_direct.R       # Main implementation (~1560 lines)
 ```
 
 ### What Was Built
@@ -24,14 +24,17 @@ chattrBackground/
 - Clean Shiny-based UI
 - Runs in RStudio Viewer pane
 
-#### 2. Tool Calling System (5 Tools)
+#### 2. Tool Calling System (4 Tools)
 ```r
-1. search_r_help(topic)           # R documentation search
-2. search_r_packages(keyword)     # Package search
-3. get_user_dataframes()          # Auto data retrieval
-4. get_user_script()              # Auto script retrieval
-5. run_batch_classify(...)        # Semantic text analysis
+1. search_r_help(topic)                          # R documentation search
+2. search_r_packages(keyword)                    # Package search
+3. fetch_help_page(url, focus, max_chars)        # Fetch online help page
+4. run_batch_classify(df, column, prompt, ...)   # Semantic text analysis
 ```
+
+**Context Sharing** (via UI buttons or commands, not tools):
+- `/script` or "Share Script" button - Injects current R script into message
+- `/data` or "Share Data" button - Injects dataframe list into message
 
 #### 3. Tool Execution Loop
 - Proper message history management
@@ -49,221 +52,177 @@ chattrBackground/
 
 #### 5. Technical Achievements
 
-**Critical Fix:** Empty tool parameters
-```r
-# Serializes as {} not []
-properties = structure(list(), names = character(0))
-```
-
-**Proper Message Format:**
-```json
-[
-  {"role": "system", "content": "..."},
-  {"role": "user", "content": "..."},
-  {"role": "assistant", "content": "...", "tool_calls": [...]},
-  {"role": "tool", "content": "..."}
-]
-```
+- **Empty tool parameters** - Serializes as `{}` not `[]` using `structure(list(), names = character(0))`
+- **Proper Ollama message format** - System, user, assistant, tool roles
+- **USE_CUSTOM_INSTRUCTIONS** - Override mechanism for Ollama Modelfile
+- **Universal language rules** - Enforced at Modelfile level (prevents Thai/Chinese output)
 
 ### Installation & Usage
 
 #### Install
 ```bash
-cd /tmp/chattrBackground
+cd /usr/local/src/chattrBackground
 R CMD INSTALL .
 ```
 
-#### Launch from RStudio
-1. Addins menu
-2. Click "SARA Chat (AI Assistant)"
-3. Chat appears in Viewer pane
-
-#### Launch from R
+#### Launch
 ```r
 library(chattrBackground)
 sara_chat()
+# Or: RStudio Addins → "SARA Chat (AI Assistant)"
 ```
 
 
-### Core Implementation Details
+### Core Implementation
 
-#### sara_direct.R Structure (612 lines)
+**File:** `R/sara_direct.R` (~1560 lines)
 
-1. **Helper Functions (Lines 1-150)**
-   - Tool implementations
-   - get_user_port() (legacy, not used)
-   - search_r_help()
-   - search_r_packages()
-   - get_user_dataframes()
-   - get_user_script()
-   - run_batch_classify()
-
-2. **Tool Definitions (Lines 151-250)**
-   - get_tools() - Returns Ollama tool JSON
-   - execute_tool() - Dispatcher for tool execution
-
-3. **System Prompt (Lines 251-280)**
-   - Instructions for SARA
-   - Tool usage guidelines
-   - Tidyverse preferences
-   - Semantic analysis instructions
-
-4. **API Integration (Lines 281-380)**
-   - call_ollama_with_tools() - Main API function
-   - Handles tool calling loop
-   - Status callback support
-   - Error handling
-
-5. **Shiny UI (Lines 381-480)**
-   - Title and user info
-   - Clear chat button
-   - Chat container with scroll
-   - Status message area
-   - User input and send button
-   - Auto-scroll JavaScript
-
-6. **Shiny Server (Lines 481-612)**
-   - Reactive chat history
-   - Status message updates
-   - Message rendering (skip tool messages)
-   - Tool call visualization
-   - Send/Clear event handlers
-   - RStudio Viewer integration
+**Main Components:**
+1. Helper functions (4 registered tools + 2 context functions)
+   - Tools: `search_r_help`, `search_r_packages`, `fetch_help_page`, `run_batch_classify`
+   - Context: `get_user_dataframes`, `get_user_script` (accessed via UI/commands)
+2. Tool definitions (`get_tools()`) and execution (`execute_tool()`)
+3. System prompt with `USE_CUSTOM_INSTRUCTIONS` override
+4. Ollama API integration with tool calling loop (`call_ollama_with_tools()`)
+5. Shiny UI (chat interface with script/data sharing buttons)
+6. Shiny server (message handling, rendering, and debug mode)
 
 ### Dependencies
 
-#### Required
-- **shiny** - UI framework
-- **httr2** - HTTP client for Ollama API
+**Required:**
+- `shiny` - UI framework
+- `httr2` - HTTP client for Ollama API
 
-#### Optional
-- **rstudioapi** - For get_user_script() tool
+**Optional:**
+- `rstudioapi` - For script access via RStudio
 
-#### External
-- **Ollama** - Running locally at 127.0.0.1:11434
-- **sara model** - Configured in Ollama
-
-### Testing Checklist
-
-✅ Package installs without errors
-✅ Loads in R session
-✅ Addin appears in RStudio menu
-✅ Chat UI launches in Viewer
-✅ Can send messages
-✅ Status updates appear
-✅ Clear chat works
-✅ Tool definitions are correct
-✅ Empty parameters serialize as {}
-
-### Performance Characteristics
-
-- **Startup:** < 1 second
-- **First message:** ~2-5 seconds (model dependent)
-- **Tool calls:** ~1-3 seconds per tool
-- **Batch classify:** ~0.5 seconds per row (model dependent)
-- **Memory:** ~50MB for Shiny + chat history
+**External:**
+- Ollama running at `127.0.0.1:11434` with `sara` model
 
 ### Known Limitations
 
-1. **Max 3 tool iterations** - Prevents infinite loops
-2. **Single user per session** - No multi-user support in same session
-3. **Requires Ollama running** - No fallback
-4. **No message editing** - Can only add new messages
-5. **No conversation export** - Would need to be added
+1. **Console Blocking** - `runApp()` blocks the R console while SARA is running
+   - User cannot execute R commands while SARA UI is active
+   - This is the primary limitation for daily usage
+2. **Max 3 tool iterations** - Prevents infinite loops
+3. **Single user per session** - No multi-user support in same session
+4. **Requires Ollama running** - No fallback
 
 ### Future Enhancement Ideas
 
-- [ ] Conversation export/import
-- [ ] Plot generation tool
-- [ ] Code execution sandbox with safety
-- [ ] Multiple model selection
-- [ ] Dark/light theme toggle
-- [ ] Message editing
-- [ ] Copy code blocks button
-- [ ] Markdown rendering for responses
+#### 🔥 HIGH PRIORITY: Non-Blocking Console with Daemonized Server
 
-### Success Metrics
+**Problem:** Currently `shiny::runApp()` blocks the console, preventing users from running R commands while SARA is active.
 
-✅ **No console output** - All interaction in UI
-✅ **Automatic context** - SARA retrieves data herself
-✅ **Real-time feedback** - Status shows tool calls
-✅ **Clean codebase** - Single file, 612 lines
-✅ **Proper tool calling** - Ollama format compliance
-✅ **Production ready** - Installed and tested
+**Solution:** Use `httpuv::startDaemonizedServer()` to run SARA in a non-blocking manner **within the same R session**.
 
-### Documentation Provided
+**Implementation Plan:**
+```r
+# In sara_direct.R, replace the blocking runApp() with:
 
-1. **README.md** - Full documentation
-2. **QUICKSTART.md** - Quick reference
-3. **This file** - Implementation summary
-4. **Code comments** - Inline documentation
+# Current (blocks console):
+shiny::runApp(app)
 
-### Deployment Status
+# New approach (non-blocking):
+library(httpuv)
 
-**Current State:** ✅ PRODUCTION READY
+# Extract HTTP handlers from Shiny app
+app <- shiny::shinyApp(ui = ui, server = server)
+app_handlers <- shiny::createAppHandlers(httpPath = app, httpHandler = app)
 
-- Installed at `/usr/local/lib/R/site-library/chattrBackground`
-- Version 2.0.0
-- RStudio addin active
-- Ready for use
+# Start daemonized server (returns immediately)
+port <- get_user_port()
+server_handle <- httpuv::startDaemonizedServer(
+  host = "127.0.0.1",
+  port = port,
+  app = app_handlers
+)
 
-### How to Use
+# Open in RStudio Viewer
+if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+  url <- sprintf("http://127.0.0.1:%d", port)
+  rstudioapi::viewer(url)
+}
 
-#### Basic Chat
-1. Open RStudio
-2. Addins → "SARA Chat (AI Assistant)"
-3. Ask anything about R or your data
+# Store server handle globally for cleanup
+.GlobalEnv$.sara_server <- server_handle
 
-#### Example Queries
+message("✓ SARA Chat started (non-blocking)")
+message(sprintf("  - Port: %d", port))
+message("  - Console is now free to use")
+message("  - Stop with: httpuv::stopDaemonizedServer(.sara_server)")
 
-**Data Analysis:**
-```
-"What dataframes do I have?"
-"Analyze sentiment in reviews dataframe, comment column"
-"Mark urgent items in tickets df"
+return(invisible(server_handle))
 ```
 
-**R Help:**
-```
-"How do I use group_by in dplyr?"
-"Show me ggplot2 examples"
-"Find packages for web scraping"
-```
+**Benefits:**
+- ✅ Console remains free for R commands
+- ✅ SARA stays in same R session (maintains `.GlobalEnv` access)
+- ✅ SARA can still use `rstudioapi` to get user's script
+- ✅ SARA can still access and modify dataframes
+- ✅ No separate R process needed
 
-**Code Review:**
-```
-"Review my current script"
-"Improve this code"
-"Find bugs in my script"
-```
+**Technical Notes:**
+- Daemonized servers process requests during R's idle time
+- Works seamlessly in RStudio console
+- May need to add `httpuv` to package Imports in DESCRIPTION
+- Server persists until explicitly stopped or R session ends
 
-### Maintenance
+**Testing Requirements:**
+1. Verify dataframe access (`get_user_dataframes()` still works)
+2. Verify script access (`get_user_script()` still works)
+3. Confirm console accepts commands while SARA runs
+4. Test batch processing with non-blocking server
+5. Verify proper cleanup on session end
 
-#### Reinstall After Changes
-```bash
-cd ../chattrBackground
-R CMD INSTALL .
-```
-
-#### Update SARA Model
-```bash
-ollama pull qwen2.5:14b
-ollama cp qwen2.5:14b sara
-```
-
-#### Check Ollama
-```bash
-curl http://127.0.0.1:11434/api/version
-ollama list | grep sara
-```
-
-### Version History
-
-- **v1.0.0** - Background chattr with manual context sharing
-- **v2.0.0** - Direct SARA with autonomous tool calling ✅ CURRENT
+**Files to Modify:**
+- `R/sara_direct.R` (lines ~1555-1565)
+- `DESCRIPTION` (add `httpuv` to Imports)
 
 ---
 
-**Status:** COMPLETE AND PRODUCTION READY
-**Date:** January 26, 2026
-**Location:** `../chattrBackground/`
+#### Other Enhancement Ideas
+
+- [ ] Conversation export/import
+- [ ] Plot generation tool
+- [ ] Multiple model selection
+- [ ] Dark/light theme toggle
+- [ ] Copy code blocks button
+- [ ] Markdown rendering for responses
+
+### Quick Reference
+
+#### Launch SARA
+```r
+library(chattrBackground)
+sara_chat()
+# Or use RStudio Addins → "SARA Chat (AI Assistant)"
+```
+
+#### Reinstall After Changes
+```bash
+cd /usr/local/src/chattrBackground
+R CMD INSTALL .
+```
+
+#### Reload Ollama Model
+```bash
+ollama create sara -f /opt/qwen/Modelfile
+```
+
+---
+
+### Recent Updates (January 27, 2026)
+
+#### Language Rules Consolidation
+- Moved language rules (NEVER Thai/Chinese) to top of Modelfile
+- Rules now apply universally, regardless of custom instructions
+- Removed duplicate language rules from `sara_direct.R`
+- Added `[USE_CUSTOM_INSTRUCTIONS]` and `[NO_CUSTOM_INSTRUCTIONS]` markers
+- Ensures consistent language behavior across all SARA instances
+
+---
+
+**Version:** 2.0.0
+**Status:** ✅ PRODUCTION READY (with console blocking limitation)
+**Updated:** January 27, 2026

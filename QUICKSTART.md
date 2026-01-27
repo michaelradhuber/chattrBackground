@@ -19,36 +19,37 @@ You: "How do I use tidyr's pivot_wider?"
 ```
 SARA automatically searches R documentation and explains.
 
-### 2. Analyze Your Data
+### 2. Share Your Data Context
 ```
-You: "What dataframes do I have?"
+You: Click "Share Data" button or type /data
 ```
-SARA calls `get_user_dataframes()` and shows structure + preview.
+SARA receives your dataframe list and can work with it.
 
 ### 3. Semantic Text Classification
 ```
 You: "Mark rows as urgent in my support_tickets dataframe, comment column"
 ```
 SARA:
-1. Retrieves your dataframes
+1. Uses shared data context (or asks you to share it)
 2. Runs `run_batch_classify()` with semantic understanding
 3. Adds "urgent" column with appropriate values
 
-### 4. Get Script Context
+### 4. Share Script Context
 ```
-You: "Review my current script for improvements"
+You: Click "Share Script" button or type /script, then ask for review
 ```
-SARA retrieves your active R script and provides feedback.
+SARA receives your active R script and provides feedback.
 
-### 5. Complex Analysis
+### 5. Semantic Analysis
 ```
-You: "Find sentiment in customer_reviews dataframe, review_text column"
+1. Click "Share Data" button first
+2. You: "Find sentiment in customer_reviews dataframe, review_text column"
 ```
-SARA performs semantic sentiment analysis and adds results.
+SARA uses `run_batch_classify()` to perform semantic analysis and adds results.
 
 ## Pro Tips
 
-✅ **Let SARA retrieve context herself** - Don't paste data, just ask about it
+✅ **Share context first** - Use "Share Script" or "Share Data" buttons before asking questions
 
 ✅ **Be specific about output format** - "Return 1 for urgent, 0 otherwise"
 
@@ -58,15 +59,21 @@ SARA performs semantic sentiment analysis and adds results.
 
 ## Tool Reference
 
-### Tools SARA Can Call Herself
+### Tools SARA Can Call
 
 | Tool | Purpose | Example |
 |------|---------|---------|
-| `search_r_help()` | R documentation | "How does lm() work?" |
+| `search_r_help()` | R documentation search | "How does lm() work?" |
 | `search_r_packages()` | Package search | "Find packages for web scraping" |
-| `get_user_dataframes()` | Data retrieval | "Show my data" |
-| `get_user_script()` | Script retrieval | "Review my code" |
-| `run_batch_classify()` | Semantic analysis | "Classify sentiment" |
+| `fetch_help_page()` | Fetch online help page | Called after search_r_help |
+| `run_batch_classify()` | Semantic text analysis | "Classify sentiment" |
+
+### Context Sharing (Not Tools)
+
+| Method | Purpose | How to Use |
+|--------|---------|------------|
+| Share Script | Inject R script into chat | Click "Share Script" or type `/script` |
+| Share Data | Inject dataframe list | Click "Share Data" or type `/data` |
 
 ## Status Messages Explained
 
@@ -76,60 +83,68 @@ SARA performs semantic sentiment analysis and adds results.
 | "🔧 Calling: [tool_name]" | Executing a tool |
 | "Generating response..." | Preparing final answer |
 
-## Keyboard Shortcuts
+## UI Features
 
-- **Enter** - Send message (when in input field)
-- **Shift+Enter** - New line (in future versions)
+- **Enter** - Send message
+- **Share Script** - Inject current R script into next message
+- **Share Data** - Inject dataframe list into next message
+- **Clear Chat** - Reset conversation history
+- **Debug Mode** - Toggle debug output (for development)
 
 ## Troubleshooting
 
-**Issue:** SARA doesn't respond
-- Check Ollama is running: `curl http://127.0.0.1:11434/api/version`
-- Verify "sara" model exists: `ollama list | grep sara`
+**SARA doesn't respond**
+```bash
+# Check Ollama is running
+curl http://127.0.0.1:11434/api/version
 
-**Issue:** Tool calling fails
+# Verify sara model exists
+ollama list | grep sara
+```
+
+**Tool calling fails**
 - Check error message in status area
-- Ensure dataframe names are correct
-- Verify RStudio API is available (for script retrieval)
+- Verify dataframe names are correct (share data first)
+- Ensure RStudioAPI is available for script sharing
 
-**Issue:** Batch classify not working
-- Ensure `/usr/local/lib/R/site-library/chattr_batch_helper.R` exists
+**Batch classify not working**
+- Verify `/usr/local/lib/R/site-library/chattr_batch_helper.R` exists
+- Share data context first (Share Data button or `/data`)
 - Check dataframe has the specified column
-- Verify Ollama model supports long contexts
+- Ensure column contains text data
 
 ## Best Practices
 
 ### For Data Analysis
 ```
-✅ "Analyze urgency in support_tickets, comment column, add urgent_flag"
-❌ "Can you look at my data?"
+✅ Share data first, then: "Analyze urgency in support_tickets, comment column, add urgent_flag"
+❌ "Can you look at my data?" (without sharing context)
 ```
 
 ### For Code Help
 ```
 ✅ "Show me how to use dplyr filter with multiple conditions"
-❌ "dplyr?"
+✅ Share script first, then: "Review my dplyr code"
 ```
 
 ### For Semantic Tasks
 ```
-✅ "Classify emails as spam/not spam in email_data, subject column, add category"
-❌ "Check if these are spam"
-```
+✅ Share data, then: "Classify emails as spam/not spam in email_data, subject column, add category"
+❌ "Check if these are spam" (too vague, no context)
 
-## Advanced: Custom Batch Classification
+## Advanced: Batch Classification
 
-When SARA uses `run_batch_classify()`, she automatically:
-1. Retrieves your dataframe structure
+When SARA uses `run_batch_classify()`:
+1. Uses shared dataframe context (make sure to share data first)
 2. Constructs a clear task prompt matching your request
 3. Processes in configurable batches (default: 10 rows)
-4. Adds results as a new column
+4. Adds results as a new column to your dataframe
 5. Shows preview of results
 
 You can request specific:
-- Output formats ("Return yes/no", "Return 1-5 scale")
-- Column names ("add spam_score column")
-- Batch sizes ("process 20 at a time")
+- Output formats: "Return yes/no" or "Return 1-5 scale"
+- Column names: "add spam_score column"
+- Batch sizes: "process 20 at a time"
 
 ## Package Info
 
@@ -140,12 +155,30 @@ packageVersion("chattrBackground")
 # View help
 ?sara_chat
 
-# Reinstall
-R CMD INSTALL /tmp/chattrBackground
+# Reinstall (from source directory)
+# cd /usr/local/src/chattrBackground
+# R CMD INSTALL .
 ```
 
-## Support
+## Known Limitations
 
-Created: January 2026
-Version: 2.0.0
-Platform: R + Ollama + RStudio
+⚠️ **Console Blocking** - SARA blocks the R console while running
+- You cannot execute R commands while SARA UI is active
+- Close SARA to regain console access
+- Future enhancement: Non-blocking mode (see IMPLEMENTATION.md)
+
+## Recent Updates (January 27, 2026)
+
+- Universal language rules in Modelfile (prevents Thai/Chinese output)
+- `USE_CUSTOM_INSTRUCTIONS` override mechanism
+- Clarified tool vs. context sharing distinction
+- Improved documentation accuracy
+
+## Info
+
+**Version:** 2.0.0
+**Updated:** January 27, 2026
+**Platform:** R + Ollama + RStudio
+**Source:** `/usr/local/src/chattrBackground`
+
+For detailed technical information, see `IMPLEMENTATION.md`
