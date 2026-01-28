@@ -615,6 +615,27 @@ sara_chat <- function(as_background = NULL) {
             required = list("df_name", "column_name", "task_prompt")
           )
         )
+      ),
+      list(
+        type = "function",
+        `function` = list(
+          name = "execute_r_code",
+          description = "Execute R code in the user's environment. REQUIRES USER CONFIRMATION before execution. Use this when you want to run code to demonstrate results, test something, or help the user. The code will be shown to the user who must approve it first.",
+          parameters = list(
+            type = "object",
+            properties = list(
+              code = list(
+                type = "string",
+                description = "The R code to execute"
+              ),
+              description = list(
+                type = "string",
+                description = "Brief description of what this code does (shown to user for confirmation)"
+              )
+            ),
+            required = list("code", "description")
+          )
+        )
       )
     )
   }
@@ -636,6 +657,12 @@ sara_chat <- function(as_background = NULL) {
         result_column = tool_args$result_column %||% "result",
         batch_size = tool_args$batch_size %||% 10
       ),
+      "execute_r_code" = {
+        # Store code for user confirmation (don't execute yet)
+        pending_code_queue$code <<- tool_args$code
+        pending_code_queue$description <<- tool_args$description %||% "Execute R code"
+        "⏳ Code submitted for user confirmation. The user will see the code and can approve or reject execution. Wait for their response."
+      },
       paste("Unknown tool:", tool_name)
     )
     return(result)
@@ -670,8 +697,20 @@ Available tools:
 2. search_r_packages(keyword)
 3. fetch_help_page(url, focus, max_chars)
 4. run_batch_classify()
+5. execute_r_code(code, description) - Execute R code with user confirmation
 
 Use search_r_help() / search_r_packages() only when you are unsure about an R function or package.
+
+CODE EXECUTION
+You can execute R code using execute_r_code(code, description). This REQUIRES user confirmation before running.
+
+KEYWORD RULE:
+- If user message contains 'do!' -> call execute_r_code (ACTION mode)
+- Otherwise -> just show the code (PROPOSE mode)
+
+Example: 'remove row 30' = show code, 'do! remove row 30' = execute it
+
+Always provide a clear description of what the code does so the user can make an informed decision.
 
 HELP PAGES
 If the user asks for help or details about a function/package, you must:
@@ -885,6 +924,9 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
     cached_dataframes$time <- Sys.time()
   }, error = function(e) NULL)
 
+  # Queue for code awaiting user confirmation (shared between execute_tool and server)
+  pending_code_queue <- list(code = NULL, description = NULL)
+
   # ============================================================================
   # SHINY UI
   # ============================================================================
@@ -958,6 +1000,7 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
       shiny::column(12,
         shiny::actionButton("add_script", "📄 Add Script", class = "btn-primary"),
         shiny::actionButton("add_data", "📊 Add Data", class = "btn-primary", style = "margin-left: 10px;"),
+        shiny::actionButton("run_code", "▶️ Run Code", class = "btn-success", style = "margin-left: 10px;"),
         shiny::actionButton("clear_chat", "🗑️ Clear Chat", class = "btn-warning", style = "margin-left: 20px;"),
         shiny::actionButton("close_app", "✖️ Close SARA", class = "btn-danger", style = "margin-left: 10px;"),
         shiny::actionButton("toggle_debug", "🐛 Debug", class = "btn-info", style = "margin-left: 10px;"),
@@ -998,9 +1041,53 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
     ),
 
     shiny::fluidRow(
+      shiny::column(12,
+        shiny::uiOutput("code_confirmation_ui")
+      )
+    ),
+
+    shiny::fluidRow(
+      shiny::column(12,
+        shiny::tags$details(
+          style = "margin-bottom: 10px; padding: 8px; background: #f0f7ff; border: 1px solid #cce0ff; border-radius: 6px;",
+          shiny::tags$summary(
+            style = "cursor: pointer; color: #0066cc; font-weight: bold;",
+            "Commands & Tips"
+          ),
+          shiny::tags$div(
+            style = "margin-top: 8px; font-size: 0.9em;",
+            shiny::tags$table(
+              style = "width: 100%; border-collapse: collapse;",
+              shiny::tags$tr(
+                shiny::tags$td(style = "padding: 4px; font-family: monospace; color: #0066cc;", "do!"),
+                shiny::tags$td(style = "padding: 4px;", "SARA executes code (e.g. 'do! remove row 30')")
+              ),
+              shiny::tags$tr(style = "background: #f8f8f8;",
+                shiny::tags$td(style = "padding: 4px; font-family: monospace; color: #0066cc;", "/run"),
+                shiny::tags$td(style = "padding: 4px;", "Execute SARA's last code suggestion")
+              ),
+              shiny::tags$tr(
+                shiny::tags$td(style = "padding: 4px; font-family: monospace; color: #0066cc;", "/r <code>"),
+                shiny::tags$td(style = "padding: 4px;", "Run R code directly (e.g. '/r head(iris)')")
+              ),
+              shiny::tags$tr(style = "background: #f8f8f8;",
+                shiny::tags$td(style = "padding: 4px; font-family: monospace; color: #0066cc;", "/script"),
+                shiny::tags$td(style = "padding: 4px;", "Add current R script to conversation")
+              ),
+              shiny::tags$tr(
+                shiny::tags$td(style = "padding: 4px; font-family: monospace; color: #0066cc;", "/data"),
+                shiny::tags$td(style = "padding: 4px;", "Add dataframes info to conversation")
+              )
+            )
+          )
+        )
+      )
+    ),
+
+    shiny::fluidRow(
       shiny::column(10,
         shiny::textInput("user_input", NULL,
-                        placeholder = "Ask SARA anything... Use /script or /data to add context, or click the buttons above.",
+                        placeholder = "Ask SARA... (start with 'do!' to execute code)",
                         width = "100%")
       ),
       shiny::column(2,
@@ -1088,6 +1175,28 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
     # Pending context to be added to next message
     pending_context <- shiny::reactiveVal(NULL)
 
+    # Last code suggestion from SARA (for /run command)
+    last_code_suggestion <- shiny::reactiveVal(NULL)
+
+    # Pending code execution awaiting user confirmation (for execute_r_code tool)
+    pending_code_execution <- shiny::reactiveVal(NULL)
+
+    # Helper: Extract code blocks from SARA's response
+    extract_code_blocks <- function(text) {
+      pattern <- "```(?:r|R)?\\s*\\n([\\s\\S]*?)```"
+      matches <- gregexpr(pattern, text, perl = TRUE)
+      code_blocks <- regmatches(text, matches)[[1]]
+      if (length(code_blocks) == 0) return("")
+      extracted <- sapply(code_blocks, function(block) {
+        gsub("```(?:r|R)?\\s*\\n|```$", "", block, perl = TRUE)
+      })
+      paste(extracted, collapse = "\n\n")
+    }
+
+    has_code_block <- function(text) {
+      grepl("```", text, fixed = TRUE)
+    }
+
     # Render status message
     output$status_message <- shiny::renderUI({
       msg <- status_msg()
@@ -1140,6 +1249,97 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
     shiny::observeEvent(input$clear_pending_context, {
       pending_context(NULL)
       shiny::showNotification("Context cleared.", type = "message", duration = 2)
+    })
+
+    # Render code confirmation UI (for execute_r_code tool)
+    output$code_confirmation_ui <- shiny::renderUI({
+      pending <- pending_code_execution()
+      if (is.null(pending)) return(NULL)
+
+      shiny::div(
+        style = "margin: 10px 0; padding: 15px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px;",
+        shiny::tags$div(
+          style = "display: flex; align-items: center; margin-bottom: 10px;",
+          shiny::tags$span(style = "font-size: 1.2em; margin-right: 8px;", "⚠️"),
+          shiny::tags$strong("SARA wants to execute R code:")
+        ),
+        shiny::tags$div(
+          style = "margin-bottom: 10px; color: #666;",
+          pending$description
+        ),
+        shiny::tags$pre(
+          style = "background: #f8f9fa; padding: 10px; border-radius: 4px; margin-bottom: 10px; max-height: 200px; overflow-y: auto;",
+          pending$code
+        ),
+        shiny::div(
+          shiny::actionButton("approve_code", "✓ Approve & Run", class = "btn-success"),
+          shiny::actionButton("reject_code", "✗ Reject", class = "btn-danger", style = "margin-left: 10px;")
+        )
+      )
+    })
+
+    # Handle code approval
+    shiny::observeEvent(input$approve_code, {
+      pending <- pending_code_execution()
+      if (is.null(pending)) return()
+
+      code <- pending$code
+
+      # Execute the code in global environment
+      result_output <- tryCatch({
+        result <- eval(parse(text = code), envir = .GlobalEnv)
+        if (!is.null(result)) {
+          capture.output(print(result))
+        } else {
+          "Code executed successfully (no output)."
+        }
+      }, error = function(e) {
+        paste("Error:", e$message)
+      })
+
+      # Add execution result to chat
+      current_history <- chat_history()
+      current_history[[length(current_history) + 1]] <- list(
+        role = "user",
+        content = "[Approved code execution]"
+      )
+      current_history[[length(current_history) + 1]] <- list(
+        role = "assistant",
+        content = paste0("**Code executed:**\n```r\n", code, "\n```\n\n**Result:**\n```\n", paste(result_output, collapse = "\n"), "\n```")
+      )
+      chat_history(current_history)
+
+      # Clear pending
+      pending_code_execution(NULL)
+      pending_code_queue$code <<- NULL
+      pending_code_queue$description <<- NULL
+
+      shiny::showNotification("Code executed!", type = "message", duration = 2)
+    })
+
+    # Handle code rejection
+    shiny::observeEvent(input$reject_code, {
+      pending <- pending_code_execution()
+      if (is.null(pending)) return()
+
+      # Add rejection to chat
+      current_history <- chat_history()
+      current_history[[length(current_history) + 1]] <- list(
+        role = "user",
+        content = "[Rejected code execution]"
+      )
+      current_history[[length(current_history) + 1]] <- list(
+        role = "assistant",
+        content = "Code execution was rejected by the user."
+      )
+      chat_history(current_history)
+
+      # Clear pending
+      pending_code_execution(NULL)
+      pending_code_queue$code <<- NULL
+      pending_code_queue$description <<- NULL
+
+      shiny::showNotification("Code execution rejected.", type = "warning", duration = 2)
     })
 
     # Render chat history
@@ -1294,6 +1494,81 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
         }
       }
 
+      # Handle /run command - execute SARA's last code suggestion
+      if (grepl("^/run\\s*$", trimws(user_msg), ignore.case = TRUE)) {
+        code <- last_code_suggestion()
+        if (is.null(code) || nchar(trimws(code)) == 0) {
+          shiny::showNotification("No code suggestion to run. Ask SARA for code first.", type = "warning", duration = 3)
+          shiny::updateTextInput(session, "user_input", value = "")
+          return()
+        }
+
+        # Execute the code in global environment
+        result_output <- tryCatch({
+          result <- eval(parse(text = code), envir = .GlobalEnv)
+          if (!is.null(result)) {
+            capture.output(print(result))
+          } else {
+            "Code executed successfully (no output)."
+          }
+        }, error = function(e) {
+          paste("Error:", e$message)
+        })
+
+        # Add execution result to chat
+        current_history <- chat_history()
+        current_history[[length(current_history) + 1]] <- list(
+          role = "user",
+          content = paste0("/run\n\nExecuting:\n```r\n", code, "\n```")
+        )
+        current_history[[length(current_history) + 1]] <- list(
+          role = "assistant",
+          content = paste0("**Execution result:**\n```\n", paste(result_output, collapse = "\n"), "\n```")
+        )
+        chat_history(current_history)
+
+        shiny::updateTextInput(session, "user_input", value = "")
+        shiny::showNotification("Code executed!", type = "message", duration = 2)
+        return()
+      }
+
+      # Handle /r <code> command - execute arbitrary R code
+      if (grepl("^/r\\s+", trimws(user_msg), ignore.case = TRUE)) {
+        code <- trimws(sub("^/r\\s+", "", user_msg, ignore.case = TRUE))
+        if (nchar(code) == 0) {
+          shiny::showNotification("Usage: /r <code to execute>", type = "warning", duration = 3)
+          shiny::updateTextInput(session, "user_input", value = "")
+          return()
+        }
+
+        # Execute the code in global environment
+        result_output <- tryCatch({
+          result <- eval(parse(text = code), envir = .GlobalEnv)
+          if (!is.null(result)) {
+            capture.output(print(result))
+          } else {
+            "Code executed successfully (no output)."
+          }
+        }, error = function(e) {
+          paste("Error:", e$message)
+        })
+
+        # Add execution result to chat
+        current_history <- chat_history()
+        current_history[[length(current_history) + 1]] <- list(
+          role = "user",
+          content = paste0("/r ", code)
+        )
+        current_history[[length(current_history) + 1]] <- list(
+          role = "assistant",
+          content = paste0("**Execution result:**\n```\n", paste(result_output, collapse = "\n"), "\n```")
+        )
+        chat_history(current_history)
+
+        shiny::updateTextInput(session, "user_input", value = "")
+        return()
+      }
+
       # Include any pending context from button clicks
       ctx <- pending_context()
       if (!is.null(ctx)) {
@@ -1367,6 +1642,23 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
           thinking = result$thinking %||% NULL
         )
         chat_history(current_history)
+
+        # Extract and store code blocks for /run command
+        if (has_code_block(result$content)) {
+          code <- extract_code_blocks(result$content)
+          if (nchar(trimws(code)) > 0) {
+            last_code_suggestion(code)
+            shiny::showNotification("Tip: Type /run to execute SARA's code", type = "message", duration = 3)
+          }
+        }
+      }
+
+      # Check if SARA requested code execution (via execute_r_code tool)
+      if (!is.null(pending_code_queue$code)) {
+        pending_code_execution(list(
+          code = pending_code_queue$code,
+          description = pending_code_queue$description
+        ))
       }
 
       status_msg("")
@@ -1474,6 +1766,7 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
         list(role = "system", content = get_system_prompt())
       ))
       pending_context(NULL)
+      last_code_suggestion(NULL)
       status_msg("")
       shiny::showNotification("Chat cleared!", type = "message", duration = 2)
     })
@@ -1502,6 +1795,41 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
         shinyjs::show('debug_output')
         append_debug('Debug enabled')
       }
+    })
+
+    # Run Code button - execute SARA's last code suggestion
+    shiny::observeEvent(input$run_code, {
+      code <- last_code_suggestion()
+      if (is.null(code) || nchar(trimws(code)) == 0) {
+        shiny::showNotification("No code suggestion to run. Ask SARA for code first.", type = "warning", duration = 3)
+        return()
+      }
+
+      # Execute the code in global environment
+      result_output <- tryCatch({
+        result <- eval(parse(text = code), envir = .GlobalEnv)
+        if (!is.null(result)) {
+          capture.output(print(result))
+        } else {
+          "Code executed successfully (no output)."
+        }
+      }, error = function(e) {
+        paste("Error:", e$message)
+      })
+
+      # Add execution result to chat
+      current_history <- chat_history()
+      current_history[[length(current_history) + 1]] <- list(
+        role = "user",
+        content = paste0("[Run Code]\n\nExecuting:\n```r\n", code, "\n```")
+      )
+      current_history[[length(current_history) + 1]] <- list(
+        role = "assistant",
+        content = paste0("**Execution result:**\n```\n", paste(result_output, collapse = "\n"), "\n```")
+      )
+      chat_history(current_history)
+
+      shiny::showNotification("Code executed!", type = "message", duration = 2)
     })
   }
 
@@ -1532,11 +1860,12 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
       "shiny::runApp(app, port = port, host = '127.0.0.1', launch.browser = FALSE)"
     ), temp_script)
     
-    # Launch as background job
+    # Launch as background job with explicit environment
     rstudioapi::jobRunScript(
       path = temp_script,
       name = "SARA Chat",
-      importEnv = TRUE
+      importEnv = TRUE,
+      exportEnv = "R_GlobalEnv"
     )
     
     # Give server a moment to start, then open viewer
@@ -1554,10 +1883,10 @@ CRITICAL: task_prompt must define explicit output values (e.g., \"Return 1 if ur
   
   # Run directly (either as_background = FALSE or not in RStudio)
   app <- shiny::shinyApp(ui = ui, server = server)
-  
+
   if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
     options(shiny.launch.browser = rstudioapi::viewer)
   }
-  
+
   return(app)
 }

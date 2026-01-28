@@ -1,13 +1,14 @@
 Package: chattrBackground
 Type: Package
 Title: SARA - AI Coding Assistant with Tool Calling
-Version: 2.0.0
+Version: 2.2.0
 Author: Michael Radhuber
 Maintainer: Michael Radhuber <michael.radhuber@jku.at>
 Description: SARA is an AI coding assistant with direct Ollama integration and tool calling support.
-    SARA can automatically search R documentation, retrieve dataframes, access scripts, 
-    and perform semantic text analysis on data. No background processes needed - runs directly 
-    in Shiny with proper tool execution loop.
+    SARA can automatically search R documentation, retrieve dataframes, access scripts,
+    and perform semantic text analysis on data. The sara_chat() Shiny interface allows
+    direct R code execution via /run and /r commands. SARA can also execute code herself
+    using the execute_r_code tool, which requires user confirmation before running.
 License: MIT
 Encoding: UTF-8
 Imports: shiny, httr2
