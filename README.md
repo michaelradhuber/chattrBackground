@@ -1,7 +1,9 @@
 # SARA - AI Coding Assistant for R
 
-**Version 2.2.0** - Production Ready  
-**Updated:** January 28, 2026
+> **⚠️ RETIRED / DEPRECATED:** This package is no longer maintained and this repository is archived. No further updates, bug fixes, or support will be provided. Use at your own risk.
+
+**Final version:** 2.2.0  
+**Last updated:** January 28, 2026
 
 SARA is an AI coding assistant for R with direct Ollama integration, tool calling, and optional code execution. It runs as a Shiny app (RStudio addin or console) and can retrieve context, call tools, and execute R code with explicit user confirmation.
 
